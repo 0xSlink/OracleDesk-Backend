@@ -309,6 +309,11 @@ model Trade {
   innerTxHash  String?
   builderFee   Float          @default(0)
   errorMessage String?
+  /// Execution bounds (#245). CHECK: trades_limit_price_bps_range (limitPriceBps IS NULL OR between 1 and 10000)
+  limitPriceBps  Int?
+  /// Ledger close time (unix seconds) after which the trade must not execute.
+  deadline       BigInt?
+  decisionLedger Int?
   executedAt   DateTime?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
@@ -386,6 +391,10 @@ model PositionExit {
   /// SUBMITTED | CONFIRMED | FAILED | SIMULATED
   status           String
   error            String?
+  /// Execution bounds (#245). CHECK: position_exits_limit_price_bps_range (limitPriceBps IS NULL OR between 1 and 10000)
+  limitPriceBps    Int?
+  deadline         BigInt?
+  decisionLedger   Int?
   createdAt        DateTime @default(now())
 
   position Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
@@ -440,6 +449,9 @@ model ReasoningTrace {
   sourcesUsed         Json              // Array<{ source, weight, signal }>
   /// CHECK: reasoning_traces_prob_est_range (probabilityEstimate >= 0 AND probabilityEstimate <= 1)
   probabilityEstimate Float
+  /// The forecaster's probability before recalibration (#244); calibration fits read this.
+  /// CHECK: reasoning_traces_raw_prob_est_range (rawProbabilityEstimate IS NULL OR between 0 and 1)
+  rawProbabilityEstimate Float?
   /// CHECK: reasoning_traces_market_prob_range (marketProbability >= 0 AND marketProbability <= 1)
   marketProbability   Float
   edge                Float
@@ -1563,4 +1575,70 @@ model PremiumUsageDaily {
   @@unique([userId, date])
   @@index([userId])
   @@map("premium_usage_daily")
+}
+
+/// Market generation saga state (#152, #242). TRACE_PINNED / TRACE_PUBLISHED
+/// are legacy: the saga maps them to TRACE_ENQUEUED on resume.
+enum GenerationRunState {
+  STARTED
+  SIGNALS_READY
+  PROPOSED
+  MARKET_PERSISTED
+  QUESTION_PINNED
+  CHAIN_SUBMITTED
+  CHAIN_CONFIRMED
+  TRACE_PERSISTED
+  TRACE_PINNED
+  TRACE_PUBLISHED
+  COMPLETED
+  SKIPPED
+  NEEDS_ATTENTION
+  CANCELLED
+  GATED
+  VALIDATED
+  SEED_PLANNED
+  TRACE_ENQUEUED
+}
+
+/// One market-generation saga run (#242). Every step persists its outputs
+/// before the next side effect; `fence` increments on every claim so a worker
+/// whose lease expired can no longer write step results.
+model MarketGenerationRun {
+  id            String             @id @default(uuid())
+  trigger       String
+  state         GenerationRunState @default(STARTED)
+  attempts      Int                @default(0)
+  nextAttemptAt DateTime?
+  lockedBy      String?
+  lockedUntil   DateTime?
+  fence         Int                @default(0)
+  cycleId       String?
+  inputs        Json?
+  outputs       Json               @default("{}")
+  marketId      String?            @unique
+  market        Market?            @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  lastError     Json?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @default(now()) @updatedAt
+
+  @@index([state, nextAttemptAt])
+  @@map("market_generation_runs")
+}
+
+/// Fitted per-category recalibration maps (#244). One active row per
+/// (agentType, category); superseded versions stay for audit. `id` is the
+/// map's content hash, so a refit from the same inputs reproduces it.
+model RecalibrationMapRow {
+  id         String   @id
+  agentType  String
+  category   String
+  version    Int
+  params     Json
+  fittedFrom Json
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([agentType, category, version])
+  @@index([agentType, category, active])
+  @@map("recalibration_maps")
 }

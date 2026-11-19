@@ -21,6 +21,7 @@ import { startPaymentIntentCron } from './cron/payment-intent.cron';
 import { startEventListener } from './services/indexer.service';
 import { gateDecision, runSpecCompatGate } from './services/stellar/spec-compat';
 import { startOutboxWorker } from './services/stellar/outbox';
+import { resumeIncomplete } from './services/market-saga.service';
 import { closeRedis, getRedis, checkRedisPolicy, releaseAllWaiters } from './lib/redis';
 import { onShutdown, runShutdown } from './lib/shutdown-coordinator';
 import { memoryEventBus, redisEventBus } from './lib/event-bus';
@@ -133,6 +134,10 @@ async function bootstrap(): Promise<void> {
   // left in flight before the indexer and crons start issuing new writes, then
   // keep recovering on an interval (one instance at a time via a Redis lock).
   stopOutboxWorker = startOutboxWorker();
+
+  // 1d. Market generation saga (#242): resume runs a previous process left
+  // mid-way. Background: a slow LLM step must not delay boot.
+  void resumeIncomplete().catch((err) => logger.warn({ err }, 'Saga resume on boot failed'));
 
   // 2. Start HTTP server with hardened Socket.io
   const server = http.createServer(app);

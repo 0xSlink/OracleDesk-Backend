@@ -454,10 +454,3 @@ export async function createMarketOnChain(
   return result;
 }
 
-export async function createMarketOnChain(
-  market: Market,
-  spec: ResolutionSpecJson = defaultResolutionSpec(),
-): Promise<WriteResult<bigint>> {
-  const prep = await prepareMarketCommitment(market, spec);
-  return submitMarketCreation(market, prep);
-}

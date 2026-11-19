@@ -91,6 +91,7 @@ export async function generateReasoningTrace(
       decisionType:        input.decisionType,
       sourcesUsed:         input.sourcesUsed as any,
       probabilityEstimate: input.probabilityEstimate,
+      rawProbabilityEstimate: input.rawProbabilityEstimate ?? input.probabilityEstimate,
       marketProbability:   input.marketProbability,
       edge,
       confidenceInterval:  ci as Prisma.InputJsonValue,

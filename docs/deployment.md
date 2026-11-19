@@ -70,6 +70,33 @@ DIGEST=<sha256> ./scripts/post-deploy-checks.sh
 
 Checks are read-only. `SKIP_KUBE=1` omits the digest check in local tests.
 
+## Configuration lifecycle (#243)
+
+`src/config/index.ts` (`envObjectSchema`) is the single list of variables the
+backend accepts. Keys that nothing reads are classified in
+`src/config/meta.ts` (`KEY_LIFECYCLE`):
+
+| Status | Meaning | Boot behavior when set |
+| ------ | ------- | ---------------------- |
+| `active` (default) | Read by the code | — |
+| `reserved` | Feature not landed (e.g. `KEEPER_*`, `SSE_*`, `RESOLUTION_ATTESTATION_*`, `X402_FACILITATOR_*`) | Warns "has no effect in this version" |
+| `deprecated` | Scheduled for removal after `removeAfter` | Warns; if `replacedBy` is set and unset in env, the old value is mapped to the new key for one release |
+
+Boot also warns about an unknown variable in one of the app's prefix families
+(`CHANNEL_`, `KEEPER_`, `X402_`, ...) or within edit distance 2 of a schema key,
+with a suggestion (`CHANEL_LEASE_MS` → `CHANNEL_LEASE_MS`). `<SECRET>_FILE`
+variants of secret names are accepted. Warnings use `console.warn` once per
+key and are silent under `NODE_ENV=test`.
+
+Set `CONFIG_STRICT=true` to make any of these warnings fail boot with a
+`ConfigError` instead. Recommended for production once the warnings are clean.
+
+`npm run check:config` (`scripts/check-config-usage.ts`, TypeScript compiler
+API over `src/`, `scripts/` and `prisma/`) reports keys read but not declared,
+`active` keys never read, and `config as any` access. Reads inside
+`src/config/index.ts` (including `superRefine` cross-checks) do not count as
+usage.
+
 ## Migrations
 
 ### Naming convention

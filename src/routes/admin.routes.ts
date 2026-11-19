@@ -99,4 +99,18 @@ router.get('/risk/portfolio', requirePermission('admin.read'), getRiskPortfolio)
 router.get('/risk/portfolio/history', requirePermission('admin.read'), getRiskPortfolioHistory);
 router.post('/risk/portfolio/run', requirePermission('agents.manage'), idempotent(), runRiskPortfolio);
 
+// Market generation saga runs (#242)
+import {
+  cancelGenerationRun,
+  getGenerationRun,
+  listGenerationRuns,
+  retryGenerationRun,
+  startGenerationRun,
+} from '../controllers/generation-runs.controller';
+router.get('/generation-runs', requirePermission('markets.generate'), listGenerationRuns);
+router.get('/generation-runs/:id', requirePermission('markets.generate'), getGenerationRun);
+router.post('/generation-runs', requirePermission('markets.generate'), requireStepUp, startGenerationRun);
+router.post('/generation-runs/:id/cancel', requirePermission('markets.generate'), requireStepUp, cancelGenerationRun);
+router.post('/generation-runs/:id/retry', requirePermission('markets.generate'), requireStepUp, retryGenerationRun);
+
 export default router;
