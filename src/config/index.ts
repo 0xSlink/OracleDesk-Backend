@@ -197,6 +197,16 @@ const envSchema = z
     AUTH_IP_HASH_SALT: optionalString,
     // Express `trust proxy`; a comma list of hops or addresses, or "true".
     TRUST_PROXY: optionalString,
+    // ── Premium session device cap (#288) ────────────────────────────────
+    PREMIUM_MAX_DEVICES: z.string().default('2').transform(Number)
+      .pipe(z.number().int().min(1).max(20)),
+    PREMIUM_DAILY_READ_LIMIT: z.string().default('200').transform(Number)
+      .pipe(z.number().int().min(1)),
+    PREMIUM_DAILY_KEY_RELEASE_LIMIT: z.string().default('50').transform(Number)
+      .pipe(z.number().int().min(1)),
+    // HyperLogLog distinct-IP-prefix threshold for anomaly alerts.
+    PREMIUM_ANOMALY_IP_THRESHOLD: z.string().default('5').transform(Number)
+      .pipe(z.number().int().min(1)),
     REDIS_COMMAND_TIMEOUT_MS: z.string().default('500').transform(Number)
       .pipe(z.number().int().min(50).max(30000)),
     REDIS_CONNECT_TIMEOUT_MS: z.string().default('2000').transform(Number)
@@ -405,6 +415,20 @@ const envSchema = z
     // (non-news) source before the review may say AGREE.
     DISPUTE_HIGH_VALUE_LIQUIDITY: z.string().default('10000').transform(Number)
       .pipe(z.number().nonnegative()),
+    // Evaluator calibration (#247)
+    // Maximum acceptable one-sided Clopper–Pearson upper bound on the false-silence
+    // rate for a slice to be eligible for threshold enforcement.
+    DISPUTE_TARGET_FALSE_SILENCE_RATE: z.string().default('0.02').transform(Number)
+      .pipe(z.number().gt(0.001).max(0.2)),
+    // Minimum number of AGREE reviews above a candidate threshold before that
+    // threshold qualifies. With 0 errors, 150 reviews are needed for a 2% target.
+    DISPUTE_CALIBRATION_MIN_N: z.string().default('30').transform(Number)
+      .pipe(z.number().int().min(1)),
+    // 'off' = ignore calibration entirely.
+    // 'observe' = log shadow decisions but keep existing behaviour (default).
+    // 'enforce' = apply calibrated threshold; AGREE becomes INSUFFICIENT for
+    //             uncalibrated slices.
+    DISPUTE_CALIBRATED_THRESHOLD: z.enum(['off', 'observe', 'enforce']).default('observe'),
     // The resolver admin (guardian). The resolver has no admin view, so this
     // is configuration; cancel_proposal / guardian_void_market are simulated as it.
     RESOLVER_GUARDIAN_ADDRESS: optionalAddress,
@@ -554,6 +578,13 @@ const envSchema = z
     // creation) share the caps between the budget read and the submit.
     TREASURY_HEADROOM_SAFETY_BPS: z.string().default('500').transform(Number)
       .pipe(z.number().int().min(0).max(9_999)),
+    // #266 — fresh-price gating for the trader.
+    /** Indexer lag threshold (ledgers) before the trader prefers a live chain read. Default 12 ≈ 1 min. */
+    TRADER_MAX_PRICE_LAG_LEDGERS: z.string().default('12').transform(Number).pipe(z.number().int().min(1)),
+    /** Max price drift (bps) between decision and execution quote before refusing the order. */
+    TRADER_MAX_PRICE_DRIFT_BPS: z.string().default('150').transform(Number).pipe(z.number().int().min(0)),
+    /** Consecutive stale-price markets that abort the scan cycle with PRICE_SOURCE_DOWN. */
+    TRADER_STALE_ABORT_COUNT: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
     // #147 — development-only local IPFS stub selected explicitly.
     IPFS_TRANSPORT: z.enum(['pinata', 'local']).default('pinata'),
     IPFS_LOCAL_DIR: z.string().default('.ipfs-local'),

@@ -21,7 +21,8 @@ import { startPaymentIntentCron } from './cron/payment-intent.cron';
 import { startEventListener } from './services/indexer.service';
 import { gateDecision, runSpecCompatGate } from './services/stellar/spec-compat';
 import { startOutboxWorker } from './services/stellar/outbox';
-import { closeRedis, getRedis, checkRedisPolicy } from './lib/redis';
+import { closeRedis, getRedis, checkRedisPolicy, releaseAllWaiters } from './lib/redis';
+import { onShutdown, runShutdown } from './lib/shutdown-coordinator';
 import { memoryEventBus, redisEventBus } from './lib/event-bus';
 import { startFanout, startLocalFanout } from './lib/fanout';
 import { setControlEmitter } from './services/agent-controls.service';
@@ -280,6 +281,15 @@ async function bootstrap(): Promise<void> {
     );
   });
 
+  // ─── Shutdown coordinator registrations (#264) ───────────────────────────
+  onShutdown('stop-intake', 'event-listener', async () => { stopEventListener?.(); }, 2_000);
+  onShutdown('stop-producers', 'outbox-worker', async () => { stopOutboxWorker?.(); }, 3_000);
+  onShutdown('stop-producers', 'fanout', async () => { if (stopFanout) await stopFanout(); }, 5_000);
+  onShutdown('stop-producers', 'secret-refresh', async () => { stopSecretRefresh?.(); }, 1_000);
+  onShutdown('release-leases', 'redis-waiters', async () => { await releaseAllWaiters(); }, 2_000);
+  onShutdown('close-transports', 'prisma', async () => { await prisma.$disconnect(); }, 5_000);
+  onShutdown('close-transports', 'redis', async () => { await closeRedis(); }, 3_000);
+
   // ─── Graceful Shutdown ───
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutting down gracefully...');
@@ -299,17 +309,12 @@ async function bootstrap(): Promise<void> {
       throttle.stop();
     }
     if (stopSlowGuard) stopSlowGuard();
-    // Stop producing and consuming first, then close sockets and the HTTP
-    // server (io.close also closes `server`), then the shared connections.
-    if (stopEventListener) stopEventListener();
-    // In-flight outbox rows stay in the table and resolve on the next boot.
-    if (stopOutboxWorker) stopOutboxWorker();
-    if (stopSecretRefresh) stopSecretRefresh();
-    if (stopFanout) await stopFanout().catch(() => undefined);
+
+    const report = await runShutdown(12_000);
+    logger.info({ report }, 'shutdown-coordinator: completed');
+
     io.close(async () => {
-      await prisma.$disconnect();
-      await closeRedis();
-      logger.info('Database disconnected');
+      logger.info('HTTP server closed');
       process.exit(0);
     });
   };

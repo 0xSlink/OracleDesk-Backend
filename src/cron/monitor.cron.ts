@@ -52,6 +52,25 @@ export function startMonitorCron(): void {
     }
   }));
 
+  // Portfolio risk snapshots (#280) — every 15 minutes, after correlation snapshot
+  cron.schedule('4,19,34,49 * * * *', () => tick('portfolio-risk', async () => {
+    if (riskSnapshotRunning) {
+      logger.warn({ skippedJob: 'portfolio-risk' }, 'Monitor cron: portfolio risk still running — skipping');
+      return;
+    }
+    riskSnapshotRunning = true;
+    const startedAt = new Date();
+    try {
+      await computeAndStoreRiskSnapshot();
+      recordCronRun('portfolio-risk', 'success', startedAt, new Date());
+    } catch (err) {
+      recordCronRun('portfolio-risk', 'failure', startedAt, new Date(), err);
+      logger.error({ err }, 'Monitor cron: portfolio risk snapshot failed');
+    } finally {
+      riskSnapshotRunning = false;
+    }
+  }));
+
   // Trader Agent — every 15 minutes
   cron.schedule('5,20,35,50 * * * *', () => tick('trader', async () => {
     if (runningTraderCycleId) {

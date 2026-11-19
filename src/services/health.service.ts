@@ -13,8 +13,9 @@ import { logger } from '../lib/logger';
 import { getRedis } from '../lib/redis';
 import { rpcServer } from './stellar/clients';
 import { CURSOR_ID } from './indexer.service';
+import { latestLedgerView, indexerLag } from './chain-freshness.service';
 
-export type ProbeName = 'database' | 'redis' | 'rpc' | 'indexer';
+export type ProbeName = 'database' | 'redis' | 'rpc' | 'indexer' | 'pricing';
 
 export interface ProbeResult {
   name: ProbeName;
@@ -172,6 +173,16 @@ export const defaultProbes: Probe[] = [
       return lagging ? { ok: false, detail, error: 'lagging' } : { ok: true, detail };
     },
   },
+  {
+    name: 'pricing' as ProbeName,
+    async run() {
+      const view = await latestLedgerView();
+      const lag  = await indexerLag(view);
+      const detail = { latestLedger: view.latestLedger, cursorLedger: lag.cursorLedger, lagLedgers: lag.lagLedgers };
+      const fresh  = lag.lagLedgers !== null && lag.lagLedgers <= config.TRADER_MAX_PRICE_LAG_LEDGERS;
+      return fresh ? { ok: true, detail } : { ok: false, detail, error: 'price_source_stale' };
+    },
+  },
 ];
 
 export const health = createHealthService({
@@ -183,6 +194,7 @@ export const health = createHealthService({
     redis: config.HEALTH_CRITICAL.includes('redis'),
     rpc: config.HEALTH_CRITICAL.includes('rpc'),
     indexer: config.HEALTH_CRITICAL.includes('indexer'),
+    pricing: config.HEALTH_CRITICAL.includes('pricing'),
   },
   maxLoopDelayMs: config.LIVENESS_MAX_LOOP_DELAY_MS,
 });
