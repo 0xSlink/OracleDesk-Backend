@@ -405,6 +405,20 @@ const envSchema = z
     // (non-news) source before the review may say AGREE.
     DISPUTE_HIGH_VALUE_LIQUIDITY: z.string().default('10000').transform(Number)
       .pipe(z.number().nonnegative()),
+    // Evaluator calibration (#247)
+    // Maximum acceptable one-sided Clopper–Pearson upper bound on the false-silence
+    // rate for a slice to be eligible for threshold enforcement.
+    DISPUTE_TARGET_FALSE_SILENCE_RATE: z.string().default('0.02').transform(Number)
+      .pipe(z.number().gt(0.001).max(0.2)),
+    // Minimum number of AGREE reviews above a candidate threshold before that
+    // threshold qualifies. With 0 errors, 150 reviews are needed for a 2% target.
+    DISPUTE_CALIBRATION_MIN_N: z.string().default('30').transform(Number)
+      .pipe(z.number().int().min(1)),
+    // 'off' = ignore calibration entirely.
+    // 'observe' = log shadow decisions but keep existing behaviour (default).
+    // 'enforce' = apply calibrated threshold; AGREE becomes INSUFFICIENT for
+    //             uncalibrated slices.
+    DISPUTE_CALIBRATED_THRESHOLD: z.enum(['off', 'observe', 'enforce']).default('observe'),
     // The resolver admin (guardian). The resolver has no admin view, so this
     // is configuration; cancel_proposal / guardian_void_market are simulated as it.
     RESOLVER_GUARDIAN_ADDRESS: optionalAddress,

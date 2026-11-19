@@ -1387,11 +1387,24 @@ model DisputeReview {
   acknowledgedAt     DateTime?
   /// FINALIZED | CANCELLED | null
   resolvedAs         String?
+  /// Market category at review time, for calibration slicing (#247).
+  category           MarketCategory?
+  /// LlmProvenance JSON returned by callLLMStructured (#247).
+  evaluatorProvenance Json?
+  /// 'primary' | 'news' | 'none' — derived from evidence.items (#247).
+  evidenceClass      String?
+  /// 'YES' | 'NO' | 'VOID' — set by labelReviews once the market is final (#247).
+  finalOutcome       String?
+  /// True when proposedOutcome === finalOutcome for FINALIZED reviews (#247).
+  proposalCorrect    Boolean?
+  /// Set when this review has been labelled against chain-final ground truth (#247).
+  labelledAt         DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
   @@index([verdict])
   @@index([onChainMarketId])
+  @@index([labelledAt])
   @@map("dispute_reviews")
 }
 
