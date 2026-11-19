@@ -2,21 +2,39 @@
 
 ## Pipeline
 
-1. **Verify** — CI jobs (contract sync, migrations, build, tests, actionlint,
-   shellcheck).
-2. **Image** — buildx pushes `ghcr.io/<repo>@sha256:<digest>`, cosign signs the
-   digest, Syft emits an SPDX SBOM.
-3. **Staging** — `deploy-env.yml` verifies the cosign identity, lints migrations
-   and runs `helm upgrade --install --atomic`.
-4. **Staging checks** — readiness must hold 3 consecutive probes, indexer lag
-   must be ≤ 120 ledgers and the cursor must advance.
-5. **Production** — same reusable workflow with the production GitHub
-   Environment (required reviewers).
-6. **Production checks** — 5 consecutive readiness probes plus the same lag,
-   cursor and Prometheus checks.
+1. **Verify** — CI jobs (contract sync, migrations, build, tests, Dockerfile build check, Helm lint).
+2. **Image** — buildx pushes `ghcr.io/<repo-lowercase>@sha256:<digest>` from `Dockerfile`, cosign signs the digest, Syft emits an SPDX SBOM.
+3. **Staging** — `deploy-env.yml` verifies the cosign identity, lints changed migrations, and runs `helm upgrade --install --atomic` using `deploy/helm/oracledesk-backend/`. A Helm `pre-install,pre-upgrade` Job runs `npx prisma migrate deploy` in-cluster from the release image digest.
+4. **Staging checks** — readiness must hold 3 consecutive probes, every Deployment (`api`, `indexer`, `worker`) must run the release digest and complete rollout, indexer lag must be ≤ 120 ledgers, and the cursor must advance.
+5. **Production** — same reusable workflow with the production GitHub Environment (required reviewers).
+6. **Production checks** — 5 consecutive readiness probes plus the same digest, rollout, lag, cursor, and Prometheus checks.
 
-Secrets (kubeconfig, Helm values) live in GitHub Environments. The image is
-referenced by digest, never by a mutable tag.
+Secrets (kubeconfig, Helm values) live in GitHub Environments; `values-*.yaml` never contain secret values (pods consume an existing Kubernetes Secret via `.Values.existingSecret`). The image is referenced by lowercase repository and digest, never by a mutable tag.
+
+## Container Image & Process Roles (#272)
+
+Build locally:
+
+```bash
+docker build -t oracledesk-backend:local .
+```
+
+The multi-stage `Dockerfile` builds on `node:22-bookworm-slim` (matching `.nvmrc`), generates the Prisma client for `["native", "debian-openssl-3.0.x"]`, ships `dist/`, production dependencies, `prisma/migrations`, and `tini`, and runs as non-root `node`.
+
+`PROCESS_ROLE` splits the single image across three Kubernetes Deployments:
+
+| Subsystem | `all` (default) | `api` | `indexer` | `worker` |
+| --- | --- | --- | --- | --- |
+| Secrets, embeddings, Prisma, Redis policy, spec-compat gate | ✓ | ✓ | ✓ | ✓ |
+| HTTP API, Socket.IO, Redis fanout, RBAC bootstrap | ✓ | ✓ | | |
+| Soroban event listener (`startEventListener`) | ✓ | | ✓ | |
+| Outbox worker, cron jobs, sequence sync, saga resume | ✓ | | | ✓ |
+| Probe-only HTTP server (`/livez`, `/readyz` only) | | | ✓ | ✓ |
+
+Constraints:
+- `PROCESS_ROLE=indexer` requires `INDEXER_ENABLED=true` and `EVENT_BUS_ENABLED=true` so indexed events reach `api` pods over Redis streams.
+- `indexer` and `worker` Deployments run `replicas: 1` with `strategy: Recreate` until leader election lands.
+- `helm upgrade --atomic` rolls back the Helm release on failure, while any completed pre-upgrade migration Job is not reverted (consistent with expand/contract).
 
 ## Migration rule: expand / contract
 

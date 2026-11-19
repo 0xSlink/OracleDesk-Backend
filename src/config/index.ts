@@ -153,6 +153,8 @@ export const envObjectSchema = z
     DATABASE_URL: z.string({ error: 'is required' }).min(1, 'is required'),
     PORT: z.string().default('8000').transform(Number),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    // Process role for split Kubernetes deployments (#272): all (default), api, indexer, or worker.
+    PROCESS_ROLE: z.enum(['all', 'api', 'indexer', 'worker']).default('all'),
     // Fail boot (instead of warning) on deprecated, reserved or unknown
     // prefixed variables (#243).
     CONFIG_STRICT: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
@@ -803,6 +805,22 @@ export const envSchema = envObjectSchema
     }
     if (env.NODE_ENV === 'production' && env.IPFS_TRANSPORT === 'local') {
       ctx.addIssue({ code: 'custom', path: ['IPFS_TRANSPORT'], message: 'local IPFS is development-only' });
+    }
+    if (env.PROCESS_ROLE === 'indexer') {
+      if (!env.INDEXER_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['INDEXER_ENABLED'],
+          message: 'must be true when PROCESS_ROLE=indexer',
+        });
+      }
+      if (!env.EVENT_BUS_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['EVENT_BUS_ENABLED'],
+          message: 'must be true when PROCESS_ROLE=indexer so published events reach api pods',
+        });
+      }
     }
     if (env.X402_ENABLED) {
       if (!env.X402_FACILITATOR_URL) {
