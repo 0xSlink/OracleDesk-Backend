@@ -181,6 +181,8 @@ model User {
   refunds       Refund[]
   entitlementTokens EntitlementToken[]
   x402Settlements X402Settlement[]
+  premiumDevices PremiumDevice[]
+  premiumUsageDaily PremiumUsageDaily[]
 
   @@index([walletAddress])
   @@map("users")
@@ -1412,4 +1414,37 @@ model AlertDelivery {
 
   @@index([reviewId])
   @@map("alert_deliveries")
+}
+
+/// Tracks premium session devices per user to enforce the concurrent-device cap (#288).
+model PremiumDevice {
+  id           String   @id @default(uuid())
+  userId       String
+  /// sha-256(deviceKey) so the raw secret never touches the DB
+  deviceKeyHash String
+  label        String   @default("Device")
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceKeyHash])
+  @@index([userId])
+  @@map("premium_devices")
+}
+
+/// Per-user, per-day premium usage budget (#288).
+model PremiumUsageDaily {
+  id           String   @id @default(uuid())
+  userId       String
+  date         DateTime @db.Date
+  traceReads   Int      @default(0)
+  keyReleases  Int      @default(0)
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("premium_usage_daily")
 }
