@@ -4,7 +4,8 @@
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -136,6 +137,8 @@ enum TraceAuditStatus {
   NOT_ON_CHAIN
   FOREIGN_AGENT
   ARCHIVED
+  SIGNATURE_INVALID
+  UNSIGNED
 }
 
 enum AgentType {
@@ -464,6 +467,7 @@ model ReasoningTrace {
   provenance          Json?
   agentWallet         String?
   signature           String?
+  signingKey          String?           @db.Char(64)
   ipfsCid             String?
   /// CHECK: reasoning_traces_trace_hash_format (traceHash IS NULL OR 64 hex chars)
   /// sha256 (hex) of the exact bytes pinned to IPFS.
@@ -1641,4 +1645,44 @@ model RecalibrationMapRow {
   @@unique([agentType, category, version])
   @@index([agentType, category, active])
   @@map("recalibration_maps")
+}
+
+/// Per-signer single-use SEP-7 signing request (#270). Raw callback tokens are
+/// never persisted — only their SHA-256 hex digest (`tokenHash`).
+model Sep7Request {
+  id          String    @id @default(uuid())
+  operationId String
+  signer      String
+  tokenHash   String    @unique
+  status      String    @default("ISSUED")
+  uri         String
+  expiresAt   DateTime
+  usedAt      DateTime?
+  rejectCode  String?
+  createdAt   DateTime  @default(now())
+
+  @@unique([operationId, signer])
+  @@map("sep7_requests")
+}
+
+enum IpfsPinState {
+  PENDING
+  PINNING
+  PINNED
+  MISSING
+  FAILED
+}
+
+/// Per-CID, per-provider replication state for anchored IPFS documents (#271).
+model IpfsPin {
+  cid           String
+  provider      String
+  state         IpfsPinState @default(PENDING)
+  attempts      Int          @default(0)
+  lastError     String?
+  lastCheckedAt DateTime?
+  pinnedAt      DateTime?
+
+  @@id([cid, provider])
+  @@map("ipfs_pins")
 }

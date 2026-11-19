@@ -12,6 +12,9 @@ import {
   getAgentControls,
   getReconciliationRun,
   getSpecCompat,
+  getChainSigningKeys,
+  registerChainSigningKey,
+  retireChainSigningKey,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -21,6 +24,8 @@ import {
   getTraceAuditSummary,
   getTreasury,
   getTreasuryOperation,
+  getOperationSep7Status,
+  issueOperationSep7,
   getDisputes,
   listReconciliationRuns,
   listTreasuryOperations,
@@ -49,6 +54,8 @@ router.get('/treasury', requirePermission('treasury.read'), getTreasury);
 router.get('/treasury/operations', requirePermission('treasury.read'), listTreasuryOperations);
 router.post('/treasury/operations', requirePermission('treasury.operate'), requireStepUp, createOperation);
 router.get('/treasury/operations/:id', requirePermission('treasury.read'), getTreasuryOperation);
+router.get('/treasury/operations/:id/sep7', requirePermission('treasury.read'), getOperationSep7Status);
+router.post('/treasury/operations/:id/sep7', requirePermission('treasury.operate'), requireStepUp, issueOperationSep7);
 router.post('/treasury/operations/:id/signatures', requirePermission('treasury.operate'), requireStepUp, addOperationSignature);
 router.post('/treasury/operations/:id/submit', requirePermission('treasury.operate'), requireStepUp, submitTreasuryOperation);
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
@@ -69,6 +76,10 @@ router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), 
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
 // Spec compatibility report from the boot gate (#34): read-only diagnostics.
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
+// Agent trace signing keys (#273): permission- and step-up-guarded only.
+router.get('/chain/signing-keys', requirePermission('chain.signing_keys'), requireStepUp, getChainSigningKeys);
+router.post('/chain/signing-keys/register', requirePermission('chain.signing_keys'), requireStepUp, registerChainSigningKey);
+router.post('/chain/signing-keys/:publicKey/retire', requirePermission('chain.signing_keys'), requireStepUp, retireChainSigningKey);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);

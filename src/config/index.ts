@@ -153,6 +153,19 @@ export const envObjectSchema = z
     DATABASE_URL: z.string({ error: 'is required' }).min(1, 'is required'),
     PORT: z.string().default('8000').transform(Number),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    // Process role for split Kubernetes deployments (#272): all (default), api, indexer, or worker.
+    PROCESS_ROLE: z.enum(['all', 'api', 'indexer', 'worker']).default('all'),
+    // Multi-provider IPFS replication and hedged gateway settings (#271).
+    IPFS_PROVIDERS: commaList(z.enum(['pinata', 'kubo', 'psa']), 'pinata'),
+    IPFS_KUBO_API_URL: optionalString,
+    IPFS_KUBO_AUTH: optionalString,
+    IPFS_PSA_ENDPOINT: optionalString,
+    IPFS_PSA_TOKEN: optionalString,
+    IPFS_MIN_REPLICAS: z.string().default('1').transform(Number).pipe(z.number().int().min(1).max(10)),
+    IPFS_GATEWAYS: commaList(z.string().url(), ''),
+    IPFS_HEDGE_DELAY_MS: z.string().default('750').transform(Number).pipe(z.number().int().min(50).max(30000)),
+    IPFS_SINGLE_BLOCK_MAX: z.string().default('262144').transform(Number).pipe(z.number().int().min(1024).max(1048576)),
+    IPFS_RECHECK_HOURS: z.string().default('24').transform(Number).pipe(z.number().int().min(1).max(720)),
     // Fail boot (instead of warning) on deprecated, reserved or unknown
     // prefixed variables (#243).
     CONFIG_STRICT: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
@@ -173,6 +186,19 @@ export const envObjectSchema = z
     // JWT_SECRET, AUTH_SIGNING_SECRET or a wallet key. Format documented in
     // docs/contract-requests.md; a missing key in production stops boot.
     ENTITLEMENT_SIGNING_KEY: optionalString,
+    // Dedicated Ed25519 key for signing SEP-7 URI requests (#270); never reused.
+    URI_REQUEST_SIGNING_SECRET: optionalString,
+    // Dedicated Ed25519 key for signing reasoning traces (#273); never reused.
+    TRACE_SIGNING_KEY: optionalString,
+    TRACE_SIGNING_PREVIOUS_KEYS: commaList(
+      z.string().regex(/^[0-9a-f]{64}$/i, 'must be a 64-char hex Ed25519 public key'),
+      '',
+    ),
+    TRACE_SIGNING_REQUIRED: boolDefault('false'),
+    SEP7_ORIGIN_DOMAIN: optionalString,
+    SEP7_CALLBACK_BASE_URL: optionalString,
+    SEP7_TOKEN_TTL_SECONDS: z.string().default('3600').transform(Number)
+      .pipe(z.number().int().min(30).max(86400)),
     AUTH_HOME_DOMAIN: z.string().default('localhost'),
     AUTH_WEB_AUTH_DOMAIN: optionalString,
     // Public keys of previous server signing keys that may still verify
@@ -804,6 +830,29 @@ export const envSchema = envObjectSchema
     if (env.NODE_ENV === 'production' && env.IPFS_TRANSPORT === 'local') {
       ctx.addIssue({ code: 'custom', path: ['IPFS_TRANSPORT'], message: 'local IPFS is development-only' });
     }
+    if (env.NODE_ENV === 'production' && env.IPFS_MIN_REPLICAS < 2) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['IPFS_MIN_REPLICAS'],
+        message: 'must be >= 2 in production for redundant IPFS pin replication',
+      });
+    }
+    if (env.PROCESS_ROLE === 'indexer') {
+      if (!env.INDEXER_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['INDEXER_ENABLED'],
+          message: 'must be true when PROCESS_ROLE=indexer',
+        });
+      }
+      if (!env.EVENT_BUS_ENABLED) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['EVENT_BUS_ENABLED'],
+          message: 'must be true when PROCESS_ROLE=indexer so published events reach api pods',
+        });
+      }
+    }
     if (env.X402_ENABLED) {
       if (!env.X402_FACILITATOR_URL) {
         ctx.addIssue({ code: 'custom', path: ['X402_FACILITATOR_URL'], message: 'is required when X402_ENABLED=true' });
@@ -843,6 +892,24 @@ export const envSchema = envObjectSchema
       }
       if (env.FEE_PAYER_SECRET === env.AUTH_SIGNING_SECRET) {
         ctx.addIssue({ code: 'custom', path: ['FEE_PAYER_SECRET'], message: 'must differ from AUTH_SIGNING_SECRET' });
+      }
+    }
+    if (env.URI_REQUEST_SIGNING_SECRET) {
+      if (!StrKey.isValidEd25519SecretSeed(env.URI_REQUEST_SIGNING_SECRET)) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must be a Stellar secret seed (S…)' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.AUTH_SIGNING_SECRET) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from AUTH_SIGNING_SECRET' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.AGENT_SECRET_KEY) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from AGENT_SECRET_KEY' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.FEE_PAYER_SECRET) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from FEE_PAYER_SECRET' });
+      }
+      const cbBase = env.SEP7_CALLBACK_BASE_URL || env.PUBLIC_API_BASE_URL;
+      if (env.NODE_ENV === 'production' && cbBase && !cbBase.startsWith('https://')) {
+        ctx.addIssue({ code: 'custom', path: ['SEP7_CALLBACK_BASE_URL'], message: 'must use https:// in production' });
       }
     }
 
@@ -908,6 +975,50 @@ export const envSchema = envObjectSchema
             path: ['CHANNEL_SECRET_KEYS'],
             message: 'channel secret key must not equal AUTH_SIGNING_SECRET',
           });
+        }
+      }
+    }
+    // ── Trace signing key validation (#273) ──
+    if (env.TRACE_SIGNING_KEY) {
+      let tracePubHex: string | null = null;
+      const trimmed = env.TRACE_SIGNING_KEY.trim();
+      try {
+        if (StrKey.isValidEd25519SecretSeed(trimmed)) {
+          tracePubHex = Buffer.from(Keypair.fromSecret(trimmed).rawPublicKey()).toString('hex');
+        } else if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+          tracePubHex = Buffer.from(Keypair.fromRawEd25519Seed(Buffer.from(trimmed, 'hex')).rawPublicKey()).toString('hex');
+        } else {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['TRACE_SIGNING_KEY'],
+            message: 'must be a Stellar secret seed (S…) or 64-char hex Ed25519 seed',
+          });
+        }
+      } catch {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['TRACE_SIGNING_KEY'],
+          message: 'must be a valid Ed25519 seed',
+        });
+      }
+      if (tracePubHex) {
+        const otherSecrets: Array<[string, string | undefined]> = [
+          ['AGENT_SECRET_KEY', env.AGENT_SECRET_KEY],
+          ['AUTH_SIGNING_SECRET', env.AUTH_SIGNING_SECRET],
+          ['FEE_PAYER_SECRET', env.FEE_PAYER_SECRET],
+          ['URI_REQUEST_SIGNING_SECRET', env.URI_REQUEST_SIGNING_SECRET],
+          ...channelKeys.map((k, idx) => [`CHANNEL_SECRET_KEYS[${idx}]`, k] as [string, string]),
+        ];
+        for (const [label, other] of otherSecrets) {
+          if (!other || !StrKey.isValidEd25519SecretSeed(other)) continue;
+          const otherPubHex = Buffer.from(Keypair.fromSecret(other).rawPublicKey()).toString('hex');
+          if (otherPubHex === tracePubHex) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['TRACE_SIGNING_KEY'],
+              message: `must differ from ${label}`,
+            });
+          }
         }
       }
     }
@@ -1022,6 +1133,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     ephemeralSecrets.push('ENTITLEMENT_SIGNING_KEY');
   }
   if (!data.AUTH_WEB_AUTH_DOMAIN) data.AUTH_WEB_AUTH_DOMAIN = data.AUTH_HOME_DOMAIN;
+  if (!data.SEP7_ORIGIN_DOMAIN) data.SEP7_ORIGIN_DOMAIN = data.AUTH_HOME_DOMAIN;
+  if (!data.SEP7_CALLBACK_BASE_URL) data.SEP7_CALLBACK_BASE_URL = data.PUBLIC_API_BASE_URL;
   if (!data.SEP45_RPC_URL) data.SEP45_RPC_URL = data.STELLAR_RPC_URL;
   if (!data.AUTH_IP_HASH_SALT) {
     // A per-process salt still makes IPs unlinkable across instances; set

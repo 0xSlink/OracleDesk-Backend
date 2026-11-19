@@ -22,7 +22,7 @@ on:
       KUBECONFIG:
         required: true
       DATABASE_URL:
-        required: true
+        required: false
       HELM_VALUES:
         required: false
 
@@ -59,10 +59,8 @@ jobs:
           else
             echo "No migration files changed in this release"
           fi
-      - name: Apply migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx prisma migrate deploy
+      # Migrations are executed in-cluster by the Helm pre-install/pre-upgrade Job
+      # using the exact release image digest (deploy/helm/oracledesk-backend/templates/migrate-job.yaml).
       - name: Helm upgrade
         env:
           HELM_VALUES: ${{ secrets.HELM_VALUES }}

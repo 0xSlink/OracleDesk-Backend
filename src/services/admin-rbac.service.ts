@@ -24,6 +24,7 @@ export const ADMIN_PERMISSIONS = [
   'refund.approve',
   'refund.prepare',
   'indexer.replay',
+  'chain.signing_keys',
 ] as const;
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
 
