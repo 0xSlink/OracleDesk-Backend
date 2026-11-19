@@ -944,27 +944,37 @@ with recorded model outputs; `tests/llm-injection.test.ts` replays them through
 replaces the per-process interval guards and circuit breaker. Every provider
 attempt is `acquire()` → call → `record()`:
 
-- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, capacity =
-  RPM). An empty bucket makes `acquire` wait with jitter for up to 30 s.
+- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, `LLM_OPENAI_RPM`, capacity =
+  RPM). Classes with `bucketReserve > 0` (`dispute`, `admin`) may acquire when `tokens ≥ 1`;
+  routine classes (`bucketReserve = 0`) require `tokens ≥ 1 + maxReserve`, protecting a slice of
+  each provider's bucket for time-critical dispute reviews (#327). When rate-limited, routine
+  calls wait up to 30 s (`maxWaitMs`), whereas `dispute` calls use deadline-aware waiting up to
+  `min(deadlineMs − now − TIMEOUT_LLM_MS, LLM_DISPUTE_MAX_WAIT_MS)`.
 - **Circuit breaker** per provider: `closed → open → half-open`. A daily quota error
   opens it (Gemini: until at least the next UTC midnight); `LLM_BREAKER_FAILURE_THRESHOLD`
-  consecutive errors open it for `LLM_BREAKER_OPEN_MS`. After that exactly one probe
-  is admitted (its holder has a TTL, so a hung probe cannot block recovery);
-  success closes the breaker, failure reopens it. `LlmCircuitOpen` is `503
-  LLM_CIRCUIT_OPEN`; the router then tries the next provider.
-- **Daily budgets** per UTC day across providers and instances:
-  `LLM_DAILY_TOKEN_BUDGET` and `LLM_DAILY_COST_BUDGET_MICROS`. A call reserves
-  `ceil(chars/4) + maxTokens`; `record()` releases the reservation (also on errors
-  and responses without usage) and adds the real input/output tokens and an
-  estimated cost from `LLM_PRICES` (an estimate; update it when prices change).
-  Crashed calls are reclaimed when their lease TTL passes. Cron work stops at
-  `budget × (1 − LLM_ADMIN_RESERVE_PCT%)`; admin work runs to the full budget.
-  `LlmBudgetExceeded` is `429 LLM_BUDGET_EXCEEDED` and never falls back to another
-  provider (the budget is global). The market cycle logs `LLM_BUDGET_EXCEEDED`
-  once per day (Redis `SET NX`) and returns `null`.
+  consecutive errors open it for `LLM_BREAKER_OPEN_MS`. In `half-open`, one routine probe is
+  admitted (`probeHolder`), and if that slot is held by a non-`dispute` class, a `dispute` call
+  may take a second probe slot (`probeHolder2`) so routine probing never blocks a time-critical
+  dispute review (#327).
+- **LLM budget classes (#327)**: Each `CallContext` maps to one of six `PurposeClass`es via
+  `PURPOSE_CLASS` (`dispute_review → dispute`, `admin_* / eval → admin`, `market_generation → generation`,
+  `forecast → forecast`, `trace_hedge → hedge`, unknown → `other`). Each class has `{ guaranteePct, capPct, canBorrow, bucketReserve }`,
+  configurable via `LLM_CLASS_POLICY` (defaults: `dispute {15, 40, true, 2}`, `admin {10, 100, true, 1}`,
+  `generation {20, 50, true, 0}`, `forecast {20, 50, true, 0}`, `hedge {5, 20, true, 0}`, `other {0, 10, false, 0}`;
+  `LLM_ADMIN_RESERVE_PCT` is deprecated and maps onto `admin.guaranteePct`).
+  For daily budget `B` (`LLM_DAILY_TOKEN_BUDGET` and `LLM_DAILY_COST_BUDGET_MICROS`), class usage
+  `u_c = used_c + reserved_c`, total `U`, guarantee `g_c = floor(B · guaranteePct_c / 100)`,
+  cap `cap_c = floor(B · capPct_c / 100)`, and `heldBack = Σ_{d≠c} max(0, g_d − u_d)`:
+  1. Reject with `LlmBudgetExceeded` (`reason: 'CLASS_CAP'`) if `u_c + est > cap_c`.
+  2. Admit if `u_c + est ≤ g_c` and `U + est ≤ B` (within the class's guaranteed share).
+  3. Otherwise admit if `canBorrow` and `U + est ≤ B − heldBack` (borrowing never consumes another class's unused guarantee).
+  The day hash tracks `t:<class>`, `c:<class>`, and `r:<class>` alongside totals, and lease members
+  encode `leaseId|day|estimate|class` (with backwards-compatible reclamation of 3-part members).
+  `getLlmUsage()` exposes `{ total, byClass }` in `GET /admin/status`. Any `dispute` budget or rate-limit
+  rejection logs at `warn` and alerts via `AlertService`.
 - **Redis down**: `LLM_REDIS_FAIL_MODE=closed` (recommended) refuses calls with
   `LLM_CIRCUIT_OPEN` / `GUARD_STORE_UNAVAILABLE`; `open` falls back to a per-process
-  limiter and warns at most once a minute.
+  `MemoryGuardStore` and warns at most once a minute.
 
 Time comes from Redis `TIME` inside the scripts, so clock skew between instances
 does not matter; this is also why budgets reset at UTC midnight, unrelated to

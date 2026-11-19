@@ -97,6 +97,19 @@ API over `src/`, `scripts/` and `prisma/`) reports keys read but not declared,
 `src/config/index.ts` (including `superRefine` cross-checks) do not count as
 usage.
 
+### LLM budget classes & runtime monitors (#322, #327, #336)
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `LLM_CLASS_POLICY` | `""` (built-in table) | JSON override per purpose class (`dispute`, `admin`, `generation`, `forecast`, `hedge`, `other`) with `{ guaranteePct, capPct, canBorrow, bucketReserve }`. Sum of `guaranteePct` across all classes must be `<= 100`. |
+| `LLM_ADMIN_RESERVE_PCT` | `10` | **Deprecated** (maps onto `admin.guaranteePct` when `LLM_CLASS_POLICY` does not override `admin`). |
+| `LLM_DISPUTE_MAX_WAIT_MS` | `600000` (10 min) | Upper bound on deadline-aware rate-limit waiting for `dispute_review` calls. |
+| `LLM_OPENAI_RPM` | `50` | Per-minute token-bucket rate limit for OpenAI / OpenAI-compatible provider calls. |
+| `SPEC_COMPAT_INTERVAL_MS` | `600000` (10 min) | Interval between periodic runtime contract spec-compat and wiring checks. |
+| `SPEC_COMPAT_MIN_GAP_MS` | `60000` (60 s) | Minimum debounce gap between signal-triggered on-demand spec-compat checks. |
+| `SPEC_COMPAT_UNVERIFIABLE_RUNS` | `3` | Consecutive `unverifiable` spec-compat checks before escalating to `spec_drift` pause holds. |
+| `CRON_RUNS_RETENTION_DAYS` | `14` | Retention window in days for `cron_runs` rows (always keeping the latest 50 rows per job). |
+
 ## Migrations
 
 ### Naming convention

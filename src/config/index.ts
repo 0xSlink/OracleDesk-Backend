@@ -89,6 +89,43 @@ const reflectorFeeds = z
 
 export const PROBE_NAMES = ['database', 'redis', 'rpc', 'indexer', 'pricing', 'crons'] as const;
 
+const llmClassEntrySchema = z
+  .object({
+    guaranteePct: z.number().min(0).max(100),
+    capPct: z.number().min(0).max(100),
+    canBorrow: z.boolean(),
+    bucketReserve: z.number().int().min(0),
+  })
+  .refine((e) => e.capPct >= e.guaranteePct, 'capPct must be >= guaranteePct');
+
+const DEFAULT_LLM_CLASS_GUARANTEES: Record<string, number> = {
+  dispute: 15,
+  admin: 10,
+  generation: 20,
+  forecast: 20,
+  hedge: 5,
+  other: 0,
+};
+
+const llmClassPolicySchema = z
+  .object({
+    dispute: llmClassEntrySchema.optional(),
+    admin: llmClassEntrySchema.optional(),
+    generation: llmClassEntrySchema.optional(),
+    forecast: llmClassEntrySchema.optional(),
+    hedge: llmClassEntrySchema.optional(),
+    other: llmClassEntrySchema.optional(),
+  })
+  .strict()
+  .refine((obj) => {
+    let sum = 0;
+    for (const [cls, defaultG] of Object.entries(DEFAULT_LLM_CLASS_GUARANTEES)) {
+      const over = (obj as Record<string, { guaranteePct: number } | undefined>)[cls];
+      sum += over ? over.guaranteePct : defaultG;
+    }
+    return sum <= 100;
+  }, 'sum of class guaranteePct values must be <= 100');
+
 const probeName = z
   .string()
   .refine((v) => (PROBE_NAMES as readonly string[]).includes(v), `must be one of ${PROBE_NAMES.join(', ')}`);
@@ -556,12 +593,30 @@ export const envObjectSchema = z
       .pipe(z.number().int().positive()),
     LLM_DAILY_COST_BUDGET_MICROS: z.string().default('20000000').transform(Number)
       .pipe(z.number().int().positive()),
-    // Share of the budgets held back for admin-triggered work (cron stops first).
+    // Share of the budgets held back for admin-triggered work (deprecated in
+    // favour of LLM_CLASS_POLICY; maps onto admin.guaranteePct, #327).
     LLM_ADMIN_RESERVE_PCT: z.string().default('10').transform(Number)
       .pipe(z.number().min(0).max(100)),
+    // Per-purpose class budget policy JSON (#327): guarantees must sum to <= 100.
+    LLM_CLASS_POLICY: z
+      .string()
+      .default('')
+      .refine((v) => {
+        if (!v.trim()) return true;
+        try {
+          return llmClassPolicySchema.safeParse(JSON.parse(v)).success;
+        } catch {
+          return false;
+        }
+      }, 'must be valid JSON matching ClassPolicy per class with sum(guaranteePct) <= 100'),
+    // Max wait for a time-critical dispute review when rate-limited (#327, default 10 min).
+    LLM_DISPUTE_MAX_WAIT_MS: z.string().default('600000').transform(Number)
+      .pipe(z.number().int().positive()),
     LLM_ANTHROPIC_RPM: z.string().default('12').transform(Number)
       .pipe(z.number().int().positive()),
     LLM_GEMINI_RPM: z.string().default('15').transform(Number)
+      .pipe(z.number().int().positive()),
+    LLM_OPENAI_RPM: z.string().default('50').transform(Number)
       .pipe(z.number().int().positive()),
     LLM_BREAKER_FAILURE_THRESHOLD: z.string().default('3').transform(Number)
       .pipe(z.number().int().positive()),
