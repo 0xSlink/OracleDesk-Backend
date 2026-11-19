@@ -8,6 +8,7 @@ import { postgresContentStore } from '../services/content-store.service';
 import { correlation, newId, runWithContext } from '../lib/context';
 import { purgeExpiredIdempotencyKeys } from '../middlewares/idempotency.middleware';
 import { computeAndStoreSnapshots } from '../services/calibration.service';
+import { fitAndStoreMaps } from '../services/recalibration.service';
 import { purgeSignalStore } from '../services/signal-store.service';
 import { expireReservations } from '../services/market-reservation.service';
 import { recordCronRun } from './registry';
@@ -97,6 +98,8 @@ export function startMonitorCron(): void {
     const startedAt = new Date();
     try {
       await computeAndStoreSnapshots();
+      // #244: refit per-category recalibration maps from the same resolved data.
+      await fitAndStoreMaps().catch((err) => logger.warn({ err }, 'Monitor cron: recalibration refit failed'));
       recordCronRun('calibration', 'success', startedAt, new Date());
     } catch (err) {
       recordCronRun('calibration', 'failure', startedAt, new Date(), err);

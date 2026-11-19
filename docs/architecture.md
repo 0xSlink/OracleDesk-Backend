@@ -242,6 +242,58 @@ event deadline ──► source publishes ──► close_time ──► attesta
 - If only the close time is off and the deadline is unambiguous, it is clamped into `[max(earliestClose, now + 1 day), latestClose]` (`PROPOSAL_EXPIRY_REPAIRED`); otherwise the proposal is rejected (`PROPOSAL_UNRESOLVABLE`, with reason codes). Repair happens before `pinJson`, so the pinned document carries the final `closeTime`. The resolution hash does not cover close time and is unaffected.
 - The resolution block is stored in `Market.resolutionDetails` and pinned in question document v2 (see `docs/api.md`).
 
+## Market generation saga (#242)
+
+`src/services/market-saga.service.ts` runs market generation as a persisted
+state machine (`market_generation_runs`, model `MarketGenerationRun`). Every
+step returns `{ outputs, next }`; the merged outputs are written before the
+next step's side effect.
+
+| State | Work | Persisted output |
+|---|---|---|
+| `STARTED` | `gateCycle('MARKET_MAKER')` | `gate` (paused → `SKIPPED`) |
+| `GATED` | `aggregateSignals()` | `signalCount`, `aggregatedAt` (raw payloads stay in the signal store) |
+| `SIGNALS_READY` | `generateMarketQuestion` | `proposal`, `proposalProvenance`, `groundingSignalIds`, `evidence` |
+| `PROPOSED` | `prepareResolvableProposal`, `planPriceMarket`, `reserveProposal` | `resolutionDetails`, `marketSpec`, `reservationId` |
+| `VALIDATED` | `planMarketCreation` | `seedDecision`, `seedPolicy` (bigints as strings) |
+| `SEED_PLANNED` | `createMarketFromProposal` + `commitReservation` + `run.marketId`, one transaction | `marketId` |
+| `MARKET_PERSISTED` | `createMarketOnChain` (claim + discovery first, #41) | `onChainMarketId` / `simulated`, `chainTxHash` |
+| `CHAIN_SUBMITTED` | `market.onChainMarketId`, else `discoverLandedMarket` | `onChainMarketId` |
+| `CHAIN_CONFIRMED` | `generateReasoningTrace` | `traceId`, `tracePayload` |
+| `TRACE_PERSISTED` | `enqueueTracePublication` (upsert by `traceId`) | `publicationId` → `TRACE_ENQUEUED` → `COMPLETED` |
+
+Skips (paused, no signals, LLM budget, generation failure, unresolvable,
+duplicate, seed policy) end in `SKIPPED` with `outputs.skipReason` and keep
+the existing agent-log actions.
+
+**Idempotency.** A step whose output is already recorded returns immediately
+(no second LLM call, market insert or trace). `ChainPendingError` parks the run
+in `CHAIN_SUBMITTED` with `nextAttemptAt` = now + 30 s, not an error. Legacy
+`QUESTION_PINNED` resumes as `CHAIN_SUBMITTED` (discovery before any
+resubmission); legacy `TRACE_PINNED` / `TRACE_PUBLISHED` resume as
+`TRACE_ENQUEUED`.
+
+**Fencing and leases.** `claimRun` increments `fence`; every write is
+`updateMany({ where: { id, fence } })`, and a zero count discards the step
+result (another worker owns the run). A heartbeat extends the 300 s lease every
+60 s while a step runs.
+
+**Failures.** A failed step keeps its state, increments `attempts` and backs
+off exponentially (30 s × 2^n, max 1 h). `SAGA_MAX_ATTEMPTS`, missing IPFS or
+treasury cap errors park the run in `NEEDS_ATTENTION` with `lastError.step`;
+`POST /admin/generation-runs/:id/retry` resets it to that step.
+
+**Scheduling.** `resumeIncomplete` runs on boot (after the outbox worker) and
+every minute; due runs are selected inside `withAdvisoryLock('saga:resume')`
+and advanced outside the transaction. Aborts are honoured only before
+`MARKET_PERSISTED`.
+
+**Rollout.** The cron cycle and `POST /markets/generate` still call the linear
+`runMarketMakerCycle`; saga runs are started through
+`POST /admin/generation-runs` until the cut-over that makes
+`runMarketMakerCycle` a thin `startRun` + `advance` wrapper.
+
+
 ## Signal store (#73)
 
 Every market and trade is justified by signals (NewsAPI articles, FRED observations, GDELT events). They are stored as normalised rows with stable identities, so a pinned trace can be audited against the exact evidence long after the fetch. `src/services/ingestion.service.ts` fetches; `signal-normalize.ts` holds the pure rules; `signal-store.service.ts` holds the store (`prismaSignalStore`, and `MemorySignalStore` for tests).
@@ -747,6 +799,42 @@ policy and the exclusions are in `docs/api.md` ("Agent calibration").
   intervals and `nEff`. Calibration says nothing about the trader's *edge* while
   its probability still equals the market price (`rawValue: marketProb`), and
   `MARKET_CREATION` has no meaningful market baseline.
+
+## Recalibration (#244)
+
+`src/services/recalibration.service.ts` closes the loop between calibration
+(#68) and the forecaster (#75).
+
+- **What is fitted.** Per TRADER category, a Platt map
+  `logit(p') = a + b·logit(p)`: weighted logistic regression of the outcome on
+  the raw forecast's log-odds (the `buildSamples` weights), MAP-estimated by
+  Newton–Raphson (≤ 25 iterations, identity if it does not converge) under a
+  Gaussian prior centred on the identity with precision
+  `RECALIBRATION_PRIOR_STRENGTH / max(1, nEff)` (default 20).
+- **Never more confident.** `b` is clamped to `[0, 1]` and `|a|` to
+  `RECALIBRATION_MAX_INTERCEPT` (default 0.5), so a map can only pull toward
+  0.5. An underconfident slice keeps slope 1.
+- **Thin data.** A category with fewer than `MIN_SHRINKAGE_MARKETS` (50)
+  resolved markets gets no map; lookup falls back to the agent-wide map
+  (`category = '*'`), then to the identity.
+- **No feedback loop.** Traces store `rawProbabilityEstimate` (the ensemble
+  before recalibration) and `extractRows` selects
+  `COALESCE(rawProbabilityEstimate, probabilityEstimate)`, so a fit never sees
+  its own output.
+- **Storage.** `recalibration_maps` (model `RecalibrationMapRow`). The daily
+  calibration cron refits after `computeAndStoreSnapshots`, under an advisory
+  lock, and writes a new version only when `a` or `b` moves by more than
+  `1e-3`; the previous version is kept inactive. A map's `id` is the hash of
+  its parameters and `fittedFrom` (including a digest of the input rows).
+- **Application.** `forecastMarket` applies the active map to `p` and both
+  interval endpoints (monotone, so `lower ≤ p ≤ upper` holds) and scales
+  `sigmaLogit` by `b`. The ensemble keeps `raw: { p, ci }` and
+  `calibration: { mapId, version, category, applied }`. With
+  `CALIBRATION_SHRINKAGE_ENABLED=false` (default) nothing changes and the
+  identity is recorded with `applied: false`. The map id is part of the
+  forecast cache key, so a refit invalidates cached forecasts.
+- **API.** `GET /agents/calibration?include=maps` adds the active maps.
+
 
 ## Evaluating market generation (#67)
 

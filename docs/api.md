@@ -1659,13 +1659,19 @@ Internal endpoint for x402 services to obtain data keys after verifying on-chain
 ## Admin Generation Runs (auth, admin)
 
 #### `GET /admin/generation-runs`
-Lists saga generation runs with status, inputs, outputs, and lock details. Query: `state`, `page`, `limit`.
+Permission `markets.generate`. Lists saga generation runs, newest first. Query: `state` (any `GenerationRunState`), `page`, `limit` (max 100). `outputs.proposal` is reduced to `outputs.question`; `proposalProvenance`, `evidence` and `tracePayload` are omitted. Response: `data: MarketGenerationRun[]`, `meta: { page, limit, total, totalPages }`.
 
 #### `GET /admin/generation-runs/:id`
-Inspects a specific saga generation run.
+Permission `markets.generate`. The full run: `state`, `attempts`, `nextAttemptAt`, `lockedBy`, `lockedUntil`, `fence`, `outputs` (every step's recorded output) and `lastError` (`{ step, message, code }`). 404 `RUN_NOT_FOUND`.
+
+#### `POST /admin/generation-runs`
+Permission `markets.generate` + step-up. Starts an admin-triggered saga run in the background. 202 `{ runId }`.
 
 #### `POST /admin/generation-runs/:id/cancel`
-Cancels an incomplete run in `NEEDS_ATTENTION` before on-chain submission, safely setting associated pending market to `CANCELLED`.
+Permission `markets.generate` + step-up. Body: `{ reason? }`. Allowed while the run (or, for `NEEDS_ATTENTION`, its failed step) is before `MARKET_PERSISTED`, i.e. before anything is pinned or submitted. A linked `PENDING` market is set to `CANCELLED`; an uncommitted dedup reservation is released. Otherwise 400 `CANNOT_CANCEL_AFTER_PIN`.
+
+#### `POST /admin/generation-runs/:id/retry`
+Permission `markets.generate` + step-up. Resets a `NEEDS_ATTENTION` run to `lastError.step` with `attempts = 0` and resumes it in the background. 202 with the run. 400 `RUN_NOT_RETRYABLE` for any other state.
 
 ---
 

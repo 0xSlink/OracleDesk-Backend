@@ -363,7 +363,8 @@ export async function extractRows(db: Db, since: Date | null): Promise<TraceRow[
            t."agentType"::text                        AS "agentType",
            t."decisionType"                           AS "decisionType",
            m."category"::text                         AS "category",
-           t."probabilityEstimate"                    AS "p",
+           -- #244: fit on the raw forecast so recalibration never measures itself.
+           COALESCE(t."rawProbabilityEstimate", t."probabilityEstimate") AS "p",
            t."marketProbability"                      AS "pm",
            t."createdAt"                              AS "createdAt",
            m."resolvedAt"                             AS "resolvedAt",

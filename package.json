@@ -26,7 +26,8 @@
     "snapshot:export": "tsx scripts/snapshot-export.ts",
     "reconcile:post-restore": "tsx scripts/post-restore-reconcile.ts",
     "gen:schemas": "tsx scripts/gen-schemas.ts",
-    "check:schemas": "tsx scripts/gen-schemas.ts --check"
+    "check:schemas": "tsx scripts/gen-schemas.ts --check",
+    "check:config": "tsx scripts/check-config-usage.ts"
   },
   "keywords": [],
   "author": "",

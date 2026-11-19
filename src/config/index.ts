@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { Keypair, Networks, StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
 import { resolveFileVars, validateSecrets, SECRET_NAMES } from './secrets';
+import { applyDeprecatedAliases, collectConfigWarnings, emitConfigWarnings } from './meta';
 import { generateEntitlementKey } from '../services/entitlement/keys';
 
 dotenv.config();
@@ -145,11 +146,16 @@ const previousSigningKeys = z
 const boolDefault = (fallback: 'true' | 'false') =>
   z.enum(['true', 'false']).default(fallback).transform((v) => v === 'true');
 
-const envSchema = z
+// The plain object schema (#243): its `.shape` lists every key, which the
+// lifecycle metadata in ./meta.ts and the boot warnings are checked against.
+export const envObjectSchema = z
   .object({
     DATABASE_URL: z.string({ error: 'is required' }).min(1, 'is required'),
     PORT: z.string().default('8000').transform(Number),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    // Fail boot (instead of warning) on deprecated, reserved or unknown
+    // prefixed variables (#243).
+    CONFIG_STRICT: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
     REDIS_URL: z.string().default('redis://localhost:6379'),
 
     // ── HTTP ──────────────────────────────────────────────────────────────
@@ -384,6 +390,9 @@ const envSchema = z
     // ── Timebounds & Rebuilds (#42) ───────────────────────────────────────
     TIMEOUT_MARKET_CREATE_SECONDS: z.string().default('60').transform(Number).pipe(z.number().int().min(15).max(300)),
     TIMEOUT_TRADE_SECONDS: z.string().default('30').transform(Number).pipe(z.number().int().min(10).max(120)),
+    // #245: seconds after the decision ledger's close time that an agent trade
+    // may still execute (the on-chain deadline for the v2 entrypoints).
+    TRADE_DECISION_TTL_SECONDS: z.string().default('60').transform(Number).pipe(z.number().int().min(1).max(300)),
     TIMEOUT_TRACE_PUBLISH_SECONDS: z.string().default('45').transform(Number).pipe(z.number().int().min(10).max(180)),
     TIMEOUT_MAINTENANCE_SECONDS: z.string().default('30').transform(Number).pipe(z.number().int().min(10).max(120)),
     AUTH_EXPIRY_MARGIN_LEDGERS: z.string().default('12').transform(Number).pipe(z.number().int().min(2).max(100)),
@@ -510,6 +519,10 @@ const envSchema = z
     CALIBRATION_WEIGHTING: z.enum(['time', 'last', 'first']).default('time'),
     // Shrink the trader's probability toward 0.5 by the fitted calibration factor.
     CALIBRATION_SHRINKAGE_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    // #244 recalibration: identity-prior strength (pseudo-markets) and the
+    // largest log-odds intercept a fitted map may apply.
+    RECALIBRATION_PRIOR_STRENGTH: z.string().default('20').transform(Number).pipe(z.number().positive()),
+    RECALIBRATION_MAX_INTERCEPT: z.string().default('0.5').transform(Number).pipe(z.number().min(0).max(2)),
 
     // Build commit, recorded in trace provenance (#66). Set by CI/deploy.
     GIT_SHA: optionalString,
@@ -725,7 +738,9 @@ const envSchema = z
     CHAIN_CACHE_TTL_MS: z.string().default('5000').transform(Number),
     CHAIN_CACHE_NEG_TTL_MS: z.string().default('2000').transform(Number),
     CHAIN_CACHE_WAIT_MS: z.string().default('1500').transform(Number),
-  })
+  });
+
+export const envSchema = envObjectSchema
   .superRefine((env, ctx) => {
     // ── Login signing-key rotation (#48) ──
     const currentPublic =
@@ -951,6 +966,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     throw new ConfigError(`Invalid environment configuration:\n  ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // #243: keys that are set but do nothing. Computed on the raw env so
+  // <SECRET>_FILE names are still visible.
+  const configWarnings = collectConfigWarnings(env, Object.keys(envObjectSchema.shape), SECRET_NAMES);
+  applyDeprecatedAliases(resolvedEnv);
+
   if (resolvedEnv.CHAIN_CACHE_ENABLED === undefined) {
     resolvedEnv.CHAIN_CACHE_ENABLED = (resolvedEnv.NODE_ENV || env.NODE_ENV) === 'test' ? 'false' : 'true';
   }
@@ -961,6 +981,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     throw new ConfigError(`Invalid environment configuration:\n${lines.join('\n')}`);
   }
   const data = parsed.data;
+  if (configWarnings.length > 0) {
+    if (data.CONFIG_STRICT) {
+      throw new ConfigError(
+        `Invalid environment configuration (CONFIG_STRICT=true):\n${configWarnings.map((w) => `  ${w.message}`).join('\n')}`,
+      );
+    }
+    if (data.NODE_ENV !== 'test') emitConfigWarnings(configWarnings);
+  }
   // Using <NAME>_FILE implies the file provider, so refresh re-reads the
   // mounts instead of the (possibly empty) plain environment variable.
   if (
