@@ -27,7 +27,8 @@ import {
 import { toDisplayUsdc, usdcFromNumber } from '../lib/amounts';
 import { config } from '../config';
 import { logger } from '../lib/logger';
-import type { MarketView, TraderEnv } from './trader-env';
+import type { MarketView, TraderEnv, DecisionPrice } from './trader-env';
+import { StalePriceError } from '../services/market-price.service';
 import type { AggregatedSignals } from '../types';
 
 export interface TraderParams {
@@ -48,6 +49,14 @@ export const DEFAULT_PARAMS: TraderParams = {
   budgetMaxAgeMs: 60_000,
 };
 
+/** Ledger context recorded with every BuyOrder and SizingRecord (#266). */
+export interface PriceAsOf {
+  ledger: number;
+  source: 'indexed' | 'rpc';
+  lagLedgers: number;
+  yesBps: string;
+}
+
 /** The sizing decision recorded in the trace: every intermediate size in base units (#76). */
 export interface SizingRecord {
   kellyRaw: string;
@@ -58,6 +67,8 @@ export interface SizingRecord {
   binding: SizingBinding;
   safetyBps: number;
   budget: Record<string, string>;
+  /** Ledger view the decision was made against (#266). */
+  priceAsOf: PriceAsOf;
 }
 
 /** Budget state shared by the orders of one cycle. */
@@ -142,14 +153,30 @@ export async function runTraderPolicy(
     horizonDays: params.horizonDays,
   });
 
+  // Circuit breaker: abort the scan if too many consecutive stale-price markets (#266).
+  let consecutiveStale = 0;
   for (const market of activeMarkets) {
     signal?.throwIfAborted();
-    await analyzeAndTradeMarket(env, params, cycle, market, signals, signal);
+    const stale = await analyzeAndTradeMarket(env, params, cycle, market, signals, signal);
+    if (stale) {
+      consecutiveStale++;
+      if (consecutiveStale >= config.TRADER_STALE_ABORT_COUNT) {
+        await env.recordDecision({
+          kind: 'SKIP',
+          data: { reason: 'PRICE_SOURCE_DOWN', consecutiveStale },
+        });
+        logger.warn({ consecutiveStale }, 'Trader Agent: price source down — aborting market scan');
+        break;
+      }
+    } else {
+      consecutiveStale = 0;
+    }
   }
 
   logger.info('Trader Agent: cycle complete');
 }
 
+/** Returns true when the market was skipped due to a stale price (for circuit breaker tracking). */
 async function analyzeAndTradeMarket(
   env: TraderEnv,
   params: TraderParams,
@@ -157,22 +184,49 @@ async function analyzeAndTradeMarket(
   market: MarketView,
   signals: AggregatedSignals,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   try {
     // Skip if we already have an open position in this market
-    if (await env.hasOpenPosition(market.id)) return;
+    if (await env.hasOpenPosition(market.id)) return false;
 
-    // Estimate probability using signal weighting
-    const marketProb = market.currentYesProb ?? market.initialYesProb;
+    // Guard: skip markets without an on-chain id — price() cannot serve them (#266).
+    if (!market.onChainMarketId) {
+      await env.recordDecision({ kind: 'SKIP', marketId: market.id, data: { reason: 'NOT_ON_CHAIN' } });
+      return false;
+    }
+
+    // Step 0 of pricing: get a ledger-tagged price BEFORE spending LLM budget on a forecast (#266).
+    let decisionPriceResult: DecisionPrice;
+    try {
+      decisionPriceResult = await env.price(market);
+    } catch (err) {
+      if (err instanceof StalePriceError) {
+        await env.recordDecision({
+          kind: 'SKIP', marketId: market.id,
+          data: { reason: 'PRICE_STALE', detail: (err as StalePriceError).details },
+        });
+        return true; // signal stale to circuit breaker
+      }
+      throw err;
+    }
+
+    const marketProb = Number(decisionPriceResult.yesBps) / 10_000;
+    const priceAsOf: PriceAsOf = {
+      ledger: decisionPriceResult.asOfLedger,
+      source: decisionPriceResult.source,
+      lagLedgers: decisionPriceResult.lagLedgers,
+      yesBps: decisionPriceResult.yesBps.toString(),
+    };
+
     const forecast = await env.forecast(market, signals);
-    if (!forecast) return;
+    if (!forecast) return false;
     const { p: agentProb, ci: confidenceInterval } = forecast;
 
     // Compute edge
     const edge = agentProb - marketProb;
 
     // Guard: insufficient edge
-    if (Math.abs(edge) < params.minEdge) return;
+    if (Math.abs(edge) < params.minEdge) return false;
 
     // Kelly sizing — use conservative end of CI. Everything is from the side
     // being bought: a NO bet compares P(NO) = 1 − ci.upper with the NO price
@@ -204,7 +258,7 @@ async function analyzeAndTradeMarket(
         kind: 'SKIP', marketId: market.id,
         data: { reason: 'SIZE_ZERO_WIDE_CI', direction, edge, p: agentProb, ci: confidenceInterval },
       });
-      return;
+      return false;
     }
     const correlation = await env.correlation(market.id, kellyResult.betSize, direction, bankroll);
 
@@ -225,16 +279,17 @@ async function analyzeAndTradeMarket(
       binding,
       safetyBps: params.headroomSafetyBps,
       budget: budgetSnapshot(budget),
+      priceAsOf,
     };
 
     if (clamped.sizeRaw < MIN_TRADE_RAW) {
       logger.debug({ marketId: market.id, binding, finalRaw: sizing.finalRaw }, 'Position size below minimum after caps — skipping');
       await env.recordDecision({ kind: 'SKIP', marketId: market.id, data: { reason: 'SIZE_BELOW_MIN', direction, edge, sizing } });
-      return;
+      return false;
     }
 
     const amount = toDisplayUsdc(clamped.sizeRaw);
-    const price = direction === 'YES' ? marketProb : 1 - marketProb;
+    const price  = direction === 'YES' ? marketProb : 1 - marketProb;
 
     signal?.throwIfAborted();
 
@@ -250,6 +305,7 @@ async function analyzeAndTradeMarket(
       forecast,
       correlation,
       sizing,
+      priceAsOf,
     });
     if (result.ok) cycle.current = spend(cycle.current, clamped.sizeRaw);
     await env.recordDecision({
@@ -259,7 +315,9 @@ async function analyzeAndTradeMarket(
     });
 
     if (result.ok) logger.info({ marketId: market.id, direction, amount, binding, edge }, 'Trader Agent: trade executed');
+    return false;
   } catch (err) {
     logger.warn({ err, marketId: market.id }, 'Trader Agent: market analysis failed');
+    return false;
   }
 }

@@ -578,6 +578,13 @@ const envSchema = z
     // creation) share the caps between the budget read and the submit.
     TREASURY_HEADROOM_SAFETY_BPS: z.string().default('500').transform(Number)
       .pipe(z.number().int().min(0).max(9_999)),
+    // #266 — fresh-price gating for the trader.
+    /** Indexer lag threshold (ledgers) before the trader prefers a live chain read. Default 12 ≈ 1 min. */
+    TRADER_MAX_PRICE_LAG_LEDGERS: z.string().default('12').transform(Number).pipe(z.number().int().min(1)),
+    /** Max price drift (bps) between decision and execution quote before refusing the order. */
+    TRADER_MAX_PRICE_DRIFT_BPS: z.string().default('150').transform(Number).pipe(z.number().int().min(0)),
+    /** Consecutive stale-price markets that abort the scan cycle with PRICE_SOURCE_DOWN. */
+    TRADER_STALE_ABORT_COUNT: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
     // #147 — development-only local IPFS stub selected explicitly.
     IPFS_TRANSPORT: z.enum(['pinata', 'local']).default('pinata'),
     IPFS_LOCAL_DIR: z.string().default('.ipfs-local'),

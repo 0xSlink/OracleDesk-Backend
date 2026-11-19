@@ -6,6 +6,8 @@
  */
 import { aggregateSignals } from '../services/ingestion.service';
 import { executeTrade } from '../services/trade.service';
+import { decisionPrice, type DecisionPrice } from '../services/market-price.service';
+import { config } from '../config';
 import { ForecastSession, forecastMarket, rankForForecast, type ForecastMarket } from '../services/forecast.service';
 import { exitPosition } from '../services/exit.service';
 import { markOpenPositions } from '../services/valuation.service';
@@ -66,7 +68,11 @@ export interface MarketView {
   resolutionOracle?: string | null;
   metaUri?: string | null;
   questionHash?: string | null;
+  /** On-chain market id for ledger-tagged price reads (#266); absent when the market has no chain id. */
+  onChainMarketId?: bigint;
 }
+
+export { type DecisionPrice };
 
 export interface Forecast {
   p: number;
@@ -93,6 +99,8 @@ export interface BuyOrder {
   correlation: CorrelationCheckResult;
   /** Kelly → correlation → caps, with the binding constraint and budget snapshot (#76). */
   sizing: SizingRecord;
+  /** Ledger context for the decision price (#266). */
+  priceAsOf: import('./trader-policy').PriceAsOf;
 }
 
 export interface ExecResult {
@@ -131,6 +139,8 @@ export interface TraderEnv {
   exit(positionId: string, reason: string, price: number): Promise<ExecResult>;
   /** Trace sink: every decision the policy makes that is worth keeping. */
   recordDecision(d: DecisionRecord): Promise<void>;
+  /** Ledger-tagged decision price for a market (#266). Throws StalePriceError when no fresh source is available. */
+  price(m: MarketView): Promise<DecisionPrice>;
 }
 
 /** Production env: Prisma, the chain service, the reasoning service and the wall clock. */
@@ -174,7 +184,11 @@ export function prodTraderEnv(): TraderEnv {
         },
       });
       // The forecast cap (#75) goes to markets without a recent forecast, soonest close first.
-      return rankForForecast(markets);
+      // onChainMarketId is included so the trader can gate on fresh ledger prices (#266).
+      return rankForForecast(markets.map(m => ({
+        ...m,
+        onChainMarketId: m.onChainMarketId !== null ? BigInt(m.onChainMarketId) : undefined,
+      })));
     },
 
     signals: (_now, signal) => aggregateSignals(signal),
@@ -273,6 +287,11 @@ export function prodTraderEnv(): TraderEnv {
         return;
       }
       logger.debug({ decision: d.kind, marketId: d.marketId, ...d.data }, 'Trader decision');
+    },
+
+    async price(m) {
+      if (!m.onChainMarketId) throw new Error(`Market ${m.id} has no onChainMarketId`);
+      return decisionPrice(m.onChainMarketId, { maxLagLedgers: config.TRADER_MAX_PRICE_LAG_LEDGERS });
     },
   };
 }
