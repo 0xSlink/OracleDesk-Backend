@@ -75,20 +75,20 @@ export class LlmCircuitOpen extends AppError {
 }
 
 /**
- * Estimated prices in USD micro-units (1e-6 USD) per 1K tokens. These are
- * ESTIMATES kept in code for budgeting; check the providers' pricing pages and
- * update when models or prices change. Unknown models are priced like the
- * most expensive entry so the budget errs on the side of stopping.
+ * LLM prices live in `./llm/prices.ts` as versioned tables (#238). `LLM_PRICES`
+ * is kept for backwards compatibility with existing callers; new code should
+ * import `priceFor` from the versioned module so stored costs carry a
+ * `priceVersion` label.
  */
+import { CURRENT_PRICE_VERSION, PRICE_TABLES, priceFor } from './llm/prices';
+
 export const LLM_PRICES: Record<string, { inputPer1k: number; outputPer1k: number }> = {
-  'claude-sonnet-4-6': { inputPer1k: 3_000, outputPer1k: 15_000 },
-  'gemini-2.0-flash': { inputPer1k: 100, outputPer1k: 400 },
+  ...PRICE_TABLES[CURRENT_PRICE_VERSION],
 };
-const FALLBACK_PRICE = { inputPer1k: 3_000, outputPer1k: 15_000 };
 
 export function estimateCostMicros(usage: Usage | null): number {
   if (!usage) return 0;
-  const price = LLM_PRICES[usage.model] ?? FALLBACK_PRICE;
+  const price = priceFor(usage.model);
   return Math.ceil((usage.inputTokens * price.inputPer1k + usage.outputTokens * price.outputPer1k) / 1000);
 }
 

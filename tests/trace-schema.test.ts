@@ -4,10 +4,47 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setupTestEnv } from './helpers/env';
 import { TraceDocV1, LegacyTraceDoc, buildTraceDoc, fromContractsTrace } from '../src/schemas/trace';
-import { QuestionDocV1, QuestionDocV2, questionDocument } from '../src/schemas/question';
+import { QuestionDocV1, QuestionDocV2 } from '../src/schemas/question';
+
+// Build question documents in the same shape `market-chain.service.ts`
+// pins. The old local `questionDocument` builder in `src/schemas/question.ts`
+// emitted a different shape and was removed in #234.
+function buildQuestionV1(input: {
+  id: string;
+  question: string;
+  category: string;
+  contractCategory: string;
+  closeTime: number;
+  resolutionSource: string | null;
+  resolutionHash: string;
+}) {
+  return {
+    version: 1 as const,
+    question: input.question,
+    category: input.category,
+    contractCategory: input.contractCategory,
+    closeTime: input.closeTime,
+    resolutionSource: input.resolutionSource,
+    resolutionHash: input.resolutionHash,
+    backendMarketId: input.id,
+  };
+}
+
+function buildQuestionV2(input: {
+  id: string;
+  question: string;
+  category: string;
+  contractCategory: string;
+  closeTime: number;
+  resolutionSource: string | null;
+  resolutionHash: string;
+  resolution: Record<string, unknown>;
+}) {
+  return { ...buildQuestionV1(input), version: 2 as const, resolution: input.resolution };
+}
 import { canonicalJson, canonicalJsonStrict, verifyTraceHash } from '../src/utils/hash.util';
 import { pinDocument, setIpfsTransportForTests } from '../src/services/ipfs.service';
-import { generateSchemas } from '../scripts/gen-schemas';
+import { generateSchemas } from '../src/schemas/generate';
 
 setupTestEnv();
 
@@ -114,20 +151,15 @@ test('pinDocument refuses an invalid trace and never calls the transport', async
 });
 
 test('question v1 documents for existing markets validate and hash predictably', () => {
-  const v1 = questionDocument(
-    {
-      id: '22222222-2222-2222-2222-222222222222',
-      question: 'Will the Fed cut rates by 25bps?',
-      category: 'FED',
-      expiryTimestamp: 1729000000000,
-    },
-    {
-      specHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-      source: 'FRED',
-    },
-    'Macro',
-    1,
-  );
+  const v1 = buildQuestionV1({
+    id: '22222222-2222-2222-2222-222222222222',
+    question: 'Will the Fed cut rates by 25bps?',
+    category: 'FED',
+    contractCategory: 'Macro',
+    closeTime: Math.floor(1729000000000 / 1000),
+    resolutionSource: 'FRED',
+    resolutionHash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  });
 
   assert.equal(v1.version, 1);
   assert.doesNotThrow(() => QuestionDocV1.parse(v1));
@@ -141,23 +173,18 @@ test('question v2 document validates and pins', async () => {
   });
 
   try {
-    const v2 = questionDocument(
-      {
-        id: '22222222-2222-2222-2222-222222222222',
-        question: 'Will the Fed cut rates by 25bps in 2026?',
-        category: 'FED',
-        expiryTimestamp: 1782777600000,
-      },
-      {
-        specHash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
-        source: 'FRED',
-      },
-      'Macro',
-      2,
-    );
+    const v2 = buildQuestionV2({
+      id: '22222222-2222-2222-2222-222222222222',
+      question: 'Will the Fed cut rates by 25bps in 2026?',
+      category: 'FED',
+      contractCategory: 'Macro',
+      closeTime: Math.floor(1782777600000 / 1000),
+      resolutionSource: 'FRED',
+      resolutionHash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+      resolution: { outcome: 'pending' },
+    });
 
-    assert.equal(v2.schemaVersion, 2);
-    assert.equal(v2.kind, 'oracledesk.question');
+    assert.equal(v2.version, 2);
     assert.doesNotThrow(() => QuestionDocV2.parse(v2));
 
     const pinned = await pinDocument(QuestionDocV2, v2, 'test-question-v2');
