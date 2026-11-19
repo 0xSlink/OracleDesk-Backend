@@ -6,7 +6,8 @@ import { config } from '../config';
 import { secret } from '../config/secrets';
 import { logger } from '../lib/logger';
 import { AppError } from '../middlewares/error.middleware';
-import { assertPlainJson, canonicalBytes, NonPlainJsonError, sha256Hex } from '../utils/hash.util';
+import type { z } from 'zod';
+import { assertPlainJson, canonicalBytes, canonicalBytesStrict, NonPlainJsonError, sha256Hex } from '../utils/hash.util';
 import { getContentStore } from './content-store.service';
 import { bulkheads, deadline, sleep, TimeoutError } from '../lib/resilience';
 
@@ -141,6 +142,32 @@ export function setIpfsTransport(next: IpfsTransport): IpfsTransport {
   return prev;
 }
 
+/**
+ * Convenience test seam that accepts a bare `pin` function (what most tests
+ * want to stub) and installs an in-memory transport using it. Passing
+ * `null` reinstalls the configured transport, which is how tests clean up
+ * after themselves without having to capture the previous value.
+ */
+const defaultTransport: IpfsTransport = transport;
+export function setIpfsTransportForTests(
+  pin: null | ((bytes: Buffer, name: string) => Promise<string | { cid: string; size?: number }>),
+): void {
+  if (pin === null) {
+    transport = defaultTransport;
+    return;
+  }
+  transport = {
+    async pin(bytes, name, signal) {
+      const res = await pin(bytes, name);
+      // Support both the raw CID shape and `{ cid, size? }` used by tests.
+      return typeof res === 'string' ? res : res.cid;
+    },
+    async fetch() {
+      throw new AppError(501, 'IPFS_TEST_TRANSPORT_FETCH', 'The test transport does not support fetch');
+    },
+  };
+}
+
 export interface PinnedDocument {
   cid: string;
   /** sha256 hex of the exact bytes pinned. */
@@ -203,6 +230,45 @@ export async function pinJson(
       logger.error({ err: lastError, name }, 'IPFS pin failed after retry');
       throw new AppError(502, 'IPFS_UPLOAD_FAILED', 'Failed to pin document to IPFS', { name });
     }, opts?.signal);
+  } finally {
+    handle.cleanup?.();
+  }
+}
+
+/**
+ * Validates `doc` against `schema` (throwing a 422 `DOCUMENT_SCHEMA_INVALID`
+ * `AppError` on failure), then pins the strict-canonical bytes of the
+ * parsed value. This is the one entry point that guarantees pinned bytes
+ * came through a known schema: nothing untyped reaches the transport.
+ */
+export async function pinDocument<T extends z.ZodTypeAny>(
+  schema: T,
+  doc: z.input<T>,
+  name: string,
+  opts?: { signal?: AbortSignal },
+): Promise<PinnedDocument & { value: z.output<T> }> {
+  const result = schema.safeParse(doc);
+  if (!result.success) {
+    throw new AppError(422, 'DOCUMENT_SCHEMA_INVALID', 'Document failed schema validation before pinning', {
+      name,
+      issues: result.error.issues.map((i) => ({ path: i.path, code: i.code, message: i.message })),
+    });
+  }
+  const parsed = result.data;
+  const bytes = canonicalBytesStrict(parsed);
+  const hash = sha256Hex(bytes);
+  const handle = deadline('ipfs-pin', opts?.signal);
+  try {
+    const cid = await bulkheads['ipfs-pin'].run(async () => {
+      return transport.pin(bytes, name, handle.signal);
+    }, opts?.signal);
+    await getContentStore()
+      .put({ cid, sha256: hash, bytes, origin: 'PINNED', verifiedBy: 'pin' })
+      .catch((err: unknown) => {
+        logger.warn({ err, cid, name }, 'IPFS content store write failed; continuing');
+      });
+    logger.info({ name, cid, hash }, 'Pinned (validated) to IPFS');
+    return { cid, hash, bytes, value: parsed };
   } finally {
     handle.cleanup?.();
   }

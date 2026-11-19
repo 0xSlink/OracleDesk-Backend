@@ -1,11 +1,16 @@
 import { aggregateSignals } from '../services/ingestion.service';
 import {
   generateMarketQuestion,
-  checkDuplicate,
   createMarketFromProposal,
   normalizeCategory,
   prepareResolvableProposal,
 } from '../services/market.service';
+import {
+  reserveProposal,
+  commitReservation,
+  releaseReservation,
+  extendLease,
+} from '../services/market-reservation.service';
 import { seedPolicyRecord } from '../services/seed-policy.service';
 import { toDisplayUsdc } from '../lib/amounts';
 import { prisma } from '../lib/prisma';
@@ -143,55 +148,76 @@ export async function runMarketMakerCycle(
       }
     }
 
-    // Step 3: Deduplicate
-    const dedup = await checkDuplicate(proposal);
-    await writeAgentLog({
-      agentType: 'MARKET_MAKER',
-      level:     dedup.duplicate ? 'WARN' : 'INFO',
-      action:    dedup.duplicate ? 'DUPLICATE_SKIPPED' : 'DEDUP_CHECK',
-      marketId:  dedup.match?.marketId,
-      data:      { method: dedup.method, duplicate: dedup.duplicate, match: dedup.match },
-    }).catch(() => {});
-    if (dedup.duplicate) {
-      logger.info({ method: dedup.method, similarity: dedup.match?.similarity, matchedMarketId: dedup.match?.marketId },
-        'Market Maker Agent: duplicate market — skipping');
-      return null;
-    }
-
-    signal.throwIfAborted();
-
-    // Step 4: Seed policy. Decided before anything is written, pinned or sent:
-    // when the budget does not allow a minimum seed there is no DB row, no
-    // IPFS pin and no chain call.
-    const decision = await planMarketCreation({
-      category:             normalizeCategory(proposal.category),
-      closeTime:            new Date(proposal.expiry_timestamp * 1000),
-      p:                    proposal.initial_yes_probability,
-      ci:                   proposal.confidence_interval,
-      llmSuggestedSeedUsdc: proposal.minimum_liquidity_usdc,
+    // Step 3: Reserve the proposal atomically (replaces bare checkDuplicate).
+    // This makes dedup + insert atomic across concurrent cycles/instances (#283).
+    const reservation = await reserveProposal({
+      proposal,
+      cycleId: (signal as any)?.cycleId ?? 'unknown',
     });
-    if (decision.action === 'skip') {
-      logger.warn({ reason: decision.reason, question: proposal.market_question }, 'Market Maker Agent: seed policy skipped creation');
+    if (!reservation.ok) {
       await writeAgentLog({
         agentType: 'MARKET_MAKER',
         level:     'WARN',
-        action:    'SEED_SKIPPED',
-        data:      { reason: decision.reason, question: proposal.market_question, inputs: decision.inputs },
+        action:    'DUPLICATE_SKIPPED',
+        marketId:  reservation.match?.marketId,
+        data:      {
+          reason:                reservation.reason,
+          competingReservationId: reservation.competingReservationId,
+          match:                 reservation.match,
+        },
       }).catch(() => {});
+      logger.info(
+        { reason: reservation.reason, matchedMarketId: reservation.match?.marketId },
+        'Market Maker Agent: reservation rejected — skipping',
+      );
       return null;
     }
-    const seedPolicy = seedPolicyRecord(decision);
+    const reservationId = reservation.reservationId;
 
-    signal.throwIfAborted();
+    // The rest of the cycle must release the reservation on any non-creating exit.
+    try {
+      signal.throwIfAborted();
 
-    // Step 5: Persist market to DB (PENDING until it exists on-chain). It opens
-    // at the adjusted price, and minimumLiquidity records the decided seed.
-    const created = await createMarketFromProposal({
-      ...proposal,
-      initial_yes_probability: decision.pAdj,
-      minimum_liquidity_usdc:  toDisplayUsdc(decision.seedRaw),
-    }, proposalProvenance, resolutionDetails);
-    const market = await prisma.market.update({ where: { id: created.id }, data: { seedPolicy: seedPolicy as object } });
+      // Step 4: Seed policy. Decided before anything is written, pinned or sent:
+      // when the budget does not allow a minimum seed there is no DB row, no
+      // IPFS pin and no chain call.
+      const decision = await planMarketCreation({
+        category:             normalizeCategory(proposal.category),
+        closeTime:            new Date(proposal.expiry_timestamp * 1000),
+        p:                    proposal.initial_yes_probability,
+        ci:                   proposal.confidence_interval,
+        llmSuggestedSeedUsdc: proposal.minimum_liquidity_usdc,
+      });
+      if (decision.action === 'skip') {
+        logger.warn({ reason: decision.reason, question: proposal.market_question }, 'Market Maker Agent: seed policy skipped creation');
+        await writeAgentLog({
+          agentType: 'MARKET_MAKER',
+          level:     'WARN',
+          action:    'SEED_SKIPPED',
+          data:      { reason: decision.reason, question: proposal.market_question, inputs: decision.inputs },
+        }).catch(() => {});
+        await releaseReservation(reservationId, 'seed-policy-skip');
+        return null;
+      }
+      const seedPolicy = seedPolicyRecord(decision);
+
+      signal.throwIfAborted();
+
+      // Extend lease before the chain call, which can be slow.
+      await extendLease(reservationId).catch(() => {});
+
+      // Step 5: Persist market to DB and commit the reservation atomically.
+      let market: Awaited<ReturnType<typeof prisma.market.update>>;
+      await prisma.$transaction(async (tx) => {
+        const created = await createMarketFromProposal({
+          ...proposal,
+          initial_yes_probability: decision.pAdj,
+          minimum_liquidity_usdc:  toDisplayUsdc(decision.seedRaw),
+        }, proposalProvenance, resolutionDetails, tx);
+        market = await tx.market.update({ where: { id: created.id }, data: { seedPolicy: seedPolicy as object } });
+        await commitReservation(reservationId, market!.id, tx);
+      });
+      market = market!;
     logger.info({ marketId: market.id, category: market.category }, 'Market Maker Agent: market created in DB');
 
     // Step 6: Commit the resolution spec and create the market through the
@@ -254,6 +280,11 @@ export async function runMarketMakerCycle(
       category: String(market.category),
       onChainMarketId: onChainMarketId?.toString() ?? null,
     };
+    } catch (innerErr) {
+      // Any exit before market creation releases the reservation.
+      await releaseReservation(reservationId, String(innerErr)).catch(() => {});
+      throw innerErr;
+    }
   } catch (err) {
     logger.error({ err }, 'Market Maker Agent: unhandled cycle error');
 

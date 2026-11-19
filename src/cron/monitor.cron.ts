@@ -9,10 +9,13 @@ import { correlation, newId, runWithContext } from '../lib/context';
 import { purgeExpiredIdempotencyKeys } from '../middlewares/idempotency.middleware';
 import { computeAndStoreSnapshots } from '../services/calibration.service';
 import { purgeSignalStore } from '../services/signal-store.service';
+import { expireReservations } from '../services/market-reservation.service';
 import { recordCronRun } from './registry';
+import { computeAndStoreRiskSnapshot } from '../services/portfolio-risk.service';
 
 let runningTraderCycleId: string | null = null;
 let correlationSnapshotRunning = false;
+let riskSnapshotRunning = false;
 
 /** One correlated context per cron tick. */
 function tick(job: string, fn: () => Promise<void>): Promise<void> {
@@ -150,6 +153,12 @@ export function startMonitorCron(): void {
       recordCronRun('idempotency-purge', 'failure', startedAt, new Date(), err);
       logger.error({ err }, 'Monitor cron: idempotency key purge failed');
     }
+  });
+
+  // Market reservation lease expiry (#283) — every 5 minutes
+  cron.schedule('*/5 * * * *', async () => {
+    await expireReservations().catch((err) =>
+      logger.warn({ err: (err as Error)?.message?.slice(0, 200) }, 'Monitor cron: reservation expiry sweep failed'));
   });
 
   // Copy trade sweep — every 5 minutes
