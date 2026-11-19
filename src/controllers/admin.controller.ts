@@ -47,7 +47,9 @@ import {
   addSignature,
   cancelOperation,
   getOperation,
+  getSep7Status,
   getTreasuryState,
+  issueSep7Requests,
   listOperations,
   prepareOperation,
   recordSubmitted,
@@ -106,6 +108,16 @@ export async function recordTreasuryOperation(req: Request, res: Response): Prom
 export async function cancelTreasuryOperation(req: Request, res: Response): Promise<void> {
   await cancelOperation(String(req.params.id), actor(req));
   sendSuccess(res, { cancelled: true });
+}
+
+export async function issueOperationSep7(req: Request, res: Response): Promise<void> {
+  const issued = await issueSep7Requests(String(req.params.id), actor(req));
+  sendSuccess(res, { requests: issued }, 201);
+}
+
+export async function getOperationSep7Status(req: Request, res: Response): Promise<void> {
+  const requests = await getSep7Status(String(req.params.id));
+  sendSuccess(res, { requests });
 }
 
 /** GET /admin/agents/controls: effective state per scope plus the last 20 audit events. */

@@ -24,6 +24,7 @@ export const SECRET_NAMES = [
   'NEWSAPI_KEY',
   'FRED_API_KEY',
   'ENTITLEMENT_SIGNING_KEY',
+  'URI_REQUEST_SIGNING_SECRET',
   'DATABASE_URL',
 ] as const;
 
@@ -64,6 +65,7 @@ interface ResolvedSecrets {
   NEWSAPI_KEY: string;
   FRED_API_KEY: string;
   ENTITLEMENT_SIGNING_KEY: string;
+  URI_REQUEST_SIGNING_SECRET?: string;
   DATABASE_URL: string;
   AGENT_SECRET_KEY?: string;
   NODE_ENV?: string;

@@ -175,6 +175,12 @@ export const envObjectSchema = z
     // JWT_SECRET, AUTH_SIGNING_SECRET or a wallet key. Format documented in
     // docs/contract-requests.md; a missing key in production stops boot.
     ENTITLEMENT_SIGNING_KEY: optionalString,
+    // Dedicated Ed25519 key for signing SEP-7 URI requests (#270); never reused.
+    URI_REQUEST_SIGNING_SECRET: optionalString,
+    SEP7_ORIGIN_DOMAIN: optionalString,
+    SEP7_CALLBACK_BASE_URL: optionalString,
+    SEP7_TOKEN_TTL_SECONDS: z.string().default('3600').transform(Number)
+      .pipe(z.number().int().min(30).max(86400)),
     AUTH_HOME_DOMAIN: z.string().default('localhost'),
     AUTH_WEB_AUTH_DOMAIN: optionalString,
     // Public keys of previous server signing keys that may still verify
@@ -863,6 +869,24 @@ export const envSchema = envObjectSchema
         ctx.addIssue({ code: 'custom', path: ['FEE_PAYER_SECRET'], message: 'must differ from AUTH_SIGNING_SECRET' });
       }
     }
+    if (env.URI_REQUEST_SIGNING_SECRET) {
+      if (!StrKey.isValidEd25519SecretSeed(env.URI_REQUEST_SIGNING_SECRET)) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must be a Stellar secret seed (S…)' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.AUTH_SIGNING_SECRET) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from AUTH_SIGNING_SECRET' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.AGENT_SECRET_KEY) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from AGENT_SECRET_KEY' });
+      }
+      if (env.URI_REQUEST_SIGNING_SECRET === env.FEE_PAYER_SECRET) {
+        ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must differ from FEE_PAYER_SECRET' });
+      }
+      const cbBase = env.SEP7_CALLBACK_BASE_URL || env.PUBLIC_API_BASE_URL;
+      if (env.NODE_ENV === 'production' && cbBase && !cbBase.startsWith('https://')) {
+        ctx.addIssue({ code: 'custom', path: ['SEP7_CALLBACK_BASE_URL'], message: 'must use https:// in production' });
+      }
+    }
 
     // ── Channel Accounts validation (#37) ──
     const channelKeys: string[] = [];
@@ -1040,6 +1064,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     ephemeralSecrets.push('ENTITLEMENT_SIGNING_KEY');
   }
   if (!data.AUTH_WEB_AUTH_DOMAIN) data.AUTH_WEB_AUTH_DOMAIN = data.AUTH_HOME_DOMAIN;
+  if (!data.SEP7_ORIGIN_DOMAIN) data.SEP7_ORIGIN_DOMAIN = data.AUTH_HOME_DOMAIN;
+  if (!data.SEP7_CALLBACK_BASE_URL) data.SEP7_CALLBACK_BASE_URL = data.PUBLIC_API_BASE_URL;
   if (!data.SEP45_RPC_URL) data.SEP45_RPC_URL = data.STELLAR_RPC_URL;
   if (!data.AUTH_IP_HASH_SALT) {
     // A per-process salt still makes IPs unlinkable across instances; set

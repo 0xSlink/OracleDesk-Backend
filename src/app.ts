@@ -21,6 +21,8 @@ import { errorMiddleware } from './middlewares/error.middleware';
 import { globalLimiter } from './middlewares/rate-limit.middleware';
 import { abortMiddleware } from './middlewares/abort.middleware';
 import router from './routes';
+import wellKnownRouter from './routes/well-known.routes';
+import sep7Router from './routes/sep7.routes';
 import { createHealthRouter } from './routes/health.routes';
 import { health } from './services/health.service';
 import { isAllowedOrigin, socketMetrics } from './lib/socket-limits';
@@ -131,6 +133,12 @@ app.get('/health', (_req, res) => {
   }
   res.json({ ok: true, data, error: null });
 });
+
+// ─── SEP-7 Well-Known & Wallet Callback (#270) ───
+// Mounted before /api/v1 and outside /internal; wallet callbacks carry no Origin
+// and authenticate via single-use SHA-256 hashed tokens.
+app.use('/.well-known', wellKnownRouter);
+app.use('/sep7', sep7Router);
 
 // ─── API Routes ───
 app.use('/api/v1', router);

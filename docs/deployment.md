@@ -115,6 +115,17 @@ API over `src/`, `scripts/` and `prisma/`) reports keys read but not declared,
 `src/config/index.ts` (including `superRefine` cross-checks) do not count as
 usage.
 
+## SEP-7 `stellar.toml` Hosting (#270)
+
+When `URI_REQUEST_SIGNING_SECRET` is configured, the backend serves a minimal
+SEP-7 `/.well-known/stellar.toml` (`NETWORK_PASSPHRASE` and
+`URI_REQUEST_SIGNING_KEY`, `Content-Type: text/plain`,
+`Access-Control-Allow-Origin: *`). Wallets fetch this file from
+`https://<SEP7_ORIGIN_DOMAIN>/.well-known/stellar.toml`; if the API runs on a
+subdomain, add an edge reverse-proxy rule on `SEP7_ORIGIN_DOMAIN` forwarding
+`/.well-known/stellar.toml` to the backend. See
+`docs/runbooks/treasury-sep7.md` for key rotation steps.
+
 ## Migrations
 
 ### Naming convention

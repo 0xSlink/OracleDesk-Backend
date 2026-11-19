@@ -21,6 +21,8 @@ import {
   getTraceAuditSummary,
   getTreasury,
   getTreasuryOperation,
+  getOperationSep7Status,
+  issueOperationSep7,
   getDisputes,
   listReconciliationRuns,
   listTreasuryOperations,
@@ -49,6 +51,8 @@ router.get('/treasury', requirePermission('treasury.read'), getTreasury);
 router.get('/treasury/operations', requirePermission('treasury.read'), listTreasuryOperations);
 router.post('/treasury/operations', requirePermission('treasury.operate'), requireStepUp, createOperation);
 router.get('/treasury/operations/:id', requirePermission('treasury.read'), getTreasuryOperation);
+router.get('/treasury/operations/:id/sep7', requirePermission('treasury.read'), getOperationSep7Status);
+router.post('/treasury/operations/:id/sep7', requirePermission('treasury.operate'), requireStepUp, issueOperationSep7);
 router.post('/treasury/operations/:id/signatures', requirePermission('treasury.operate'), requireStepUp, addOperationSignature);
 router.post('/treasury/operations/:id/submit', requirePermission('treasury.operate'), requireStepUp, submitTreasuryOperation);
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
