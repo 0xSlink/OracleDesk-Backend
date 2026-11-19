@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requirePermission, requireStepUp } from '../middlewares/auth.middleware';
 import {
   ackDispute,
+  ackSpecCompat,
   addOperationSignature,
   cancelDisputeTx,
   cancelTreasuryOperation,
@@ -69,8 +70,9 @@ router.post('/trace-audit/run', requirePermission('trace_audit.run'), triggerTra
 router.get('/reconciliation/runs', requirePermission('reconciliation.run'), listReconciliationRuns);
 router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), getReconciliationRun);
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
-// Spec compatibility report from the boot gate (#34): read-only diagnostics.
+// Spec compatibility report and runtime drift acknowledgement (#34, #322).
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
+router.post('/chain/spec-compat/ack', requirePermission('agents.manage'), requireStepUp, ackSpecCompat);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);

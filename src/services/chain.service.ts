@@ -265,7 +265,8 @@ async function write<T>(
   } catch (err) {
     // A refused write never reached the chain; it is not a chain failure.
     if (!(err instanceof AgentPausedError) && (err as { name?: string } | null)?.name !== 'TradeBoundError') {
-      await recordChainWriteOutcome(scope, false, err instanceof ChainError ? err.contractError : null);
+      const errDetail = err instanceof Error ? `${err.message} ${String((err as { details?: unknown }).details ?? '')}` : String(err);
+      await recordChainWriteOutcome(scope, false, err instanceof ChainError ? err.contractError : null, errDetail);
     }
     throw err;
   }

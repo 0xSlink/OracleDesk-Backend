@@ -1675,3 +1675,30 @@ model CronRegistration {
   @@id([instanceId, job])
   @@map("cron_registrations")
 }
+
+/// Runtime contract spec compatibility check history (#322).
+model SpecCompatRun {
+  id        String   @id @default(uuid())
+  checkedAt DateTime @default(now()) @db.Timestamptz(3)
+  trigger   String
+  cls       String
+  ok        Boolean
+  report    Json
+  affected  String[] @default([])
+
+  @@index([checkedAt(sort: Desc)])
+  @@map("spec_compat_runs")
+}
+
+/// Per-source agent control holds so automatic and operator pauses do not overwrite each other (#322).
+model AgentControlHold {
+  scope       AgentControlScope
+  source      String
+  reason      String
+  createdAt   DateTime          @default(now()) @db.Timestamptz(3)
+  ackRequired Boolean           @default(false)
+  ackedBy     String?
+
+  @@id([scope, source])
+  @@map("agent_control_holds")
+}

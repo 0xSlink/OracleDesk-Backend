@@ -139,7 +139,9 @@ useMutation({
 
 `GET /api/v1/admin/status` (admin JWT) → probe details with latencies, indexer cursor vs RPC latest ledger and lag, last success/failure per cron job (in memory, reset on restart), chain execution mode, agent public key, LLM provider configuration and Gemini breaker state, and process info.
 
-`GET /api/v1/admin/chain/spec-compat` (admin JWT) → `{ mode, report }`: the contract spec compatibility report from the boot gate (#34). `report` lists, per contract, the deployed wasm hash against the pinned one and every spec difference with its `breaking`/`compatible` classification; it is `null` when the gate has not run (`SPEC_COMPAT_ENFORCE=off`). See "Contract compatibility" in `docs/architecture.md`.
+`GET /api/v1/admin/chain/spec-compat` (admin JWT, `admin.read`) → `{ mode, report, boot, current, history }` (paginated): the boot report, latest runtime compatibility report (including `wiring` for `resolver` and `treasury`), and persisted `spec_compat_runs` history (#34, #322).
+
+`POST /api/v1/admin/chain/spec-compat/ack` (admin JWT, `agents.manage`, step-up required) → `{ acknowledged, actor, cleared, holds, run }`: acknowledges active `spec_drift` holds, triggers an immediate compatibility check, and clears the holds once a check passes (#322). Resuming an agent via `POST /api/v1/admin/agents/:agent/resume` returns `409 SPEC_DRIFT_UNACKED` while a `spec_drift` hold is unacknowledged or the latest check is still breaking.
 
 ### Auth (signed challenge, SEP-10 style)
 

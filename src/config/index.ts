@@ -464,6 +464,11 @@ export const envObjectSchema = z
       .string()
       .default('')
       .refine((v) => ['', 'off', 'warn', 'enforce'].includes(v), 'must be off, warn or enforce'),
+    // Runtime spec-compat monitor (#322): periodic interval, debounce gap for
+    // signal-triggered checks, and consecutive unverifiable runs before pause.
+    SPEC_COMPAT_INTERVAL_MS: z.string().default('600000').transform(Number).pipe(z.number().int().min(1000)),
+    SPEC_COMPAT_MIN_GAP_MS: z.string().default('60000').transform(Number).pipe(z.number().int().min(100)),
+    SPEC_COMPAT_UNVERIFIABLE_RUNS: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
 
     TRUST_INBOUND_REQUEST_ID: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
     INDEXER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
