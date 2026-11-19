@@ -11,7 +11,14 @@ setupTestEnv();
 type Mod = typeof import('../src/services/health.service');
 type ProbeName = import('../src/services/health.service').ProbeName;
 
-const allCritical: Record<ProbeName, boolean> = { database: true, redis: true, rpc: true, indexer: true };
+const allCritical: Record<ProbeName, boolean> = {
+  database: true,
+  redis: true,
+  rpc: true,
+  indexer: true,
+  pricing: true,
+  crons: true,
+};
 
 async function service(
   probes: import('../src/services/health.service').Probe[],

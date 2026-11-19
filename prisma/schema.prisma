@@ -1642,3 +1642,36 @@ model RecalibrationMapRow {
   @@index([agentType, category, active])
   @@map("recalibration_maps")
 }
+
+/// Persisted execution history for scheduled cron jobs (#336).
+model CronRun {
+  id           String    @id @default(uuid())
+  job          String
+  instanceId   String
+  cycleId      String
+  scheduledAt  DateTime  @db.Timestamptz(3)
+  startedAt    DateTime  @db.Timestamptz(3)
+  finishedAt   DateTime? @db.Timestamptz(3)
+  outcome      String    @default("RUNNING")
+  errorClass   String?
+  errorMessage String?
+  durationMs   Int?
+  counters     Json?
+
+  @@index([job, startedAt(sort: Desc)])
+  @@index([outcome, startedAt])
+  @@map("cron_runs")
+}
+
+/// Active cron schedule registrations heartbeated per instance (#336).
+model CronRegistration {
+  instanceId  String
+  job         String
+  expression  String
+  timezone    String
+  enabled     Boolean
+  heartbeatAt DateTime @db.Timestamptz(3)
+
+  @@id([instanceId, job])
+  @@map("cron_registrations")
+}

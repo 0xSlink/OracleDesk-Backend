@@ -42,7 +42,7 @@ export interface MarketCycleResult {
  * Runs via the market-maker saga state machine.
  */
 export async function runMarketMakerCycle(
-  opts?: { signal?: AbortSignal; priority?: Priority },
+  opts?: { signal?: AbortSignal; priority?: Priority; onPaused?: () => void },
 ): Promise<MarketCycleResult | null> {
   logger.info('Market Maker Agent: starting cycle');
 
@@ -52,6 +52,7 @@ export async function runMarketMakerCycle(
   } catch (err) {
     if (err instanceof AgentPausedError) {
       logger.info({ ...err.details }, 'Market Maker Agent: paused — skipping cycle');
+      opts?.onPaused?.();
       return null;
     }
     throw err;

@@ -10,6 +10,7 @@ import {
   getAdminRoles,
   getAdmins,
   getAgentControls,
+  getCronRuns,
   getReconciliationRun,
   getSpecCompat,
   getSystemStatus,
@@ -57,6 +58,7 @@ router.get('/agents/controls', requirePermission('agents.manage'), getAgentContr
 router.post('/agents/:agent/pause', requirePermission('agents.manage'), pauseAgentControl);
 router.post('/agents/:agent/resume', requirePermission('agents.manage'), resumeAgentControl);
 router.get('/status', requirePermission('admin.read'), getSystemStatus);
+router.get('/crons/:job/runs', requirePermission('admin.read'), getCronRuns);
 router.get('/fees', requirePermission('admin.read'), getChainFeesReport);
 router.get('/disputes', requirePermission('disputes.manage'), getDisputes);
 router.post('/disputes/:id/ack', requirePermission('disputes.manage'), ackDispute);

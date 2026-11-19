@@ -27,7 +27,9 @@ import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat
 import { getFeeOracle } from '../services/stellar/fees';
 import { getChainCache } from '../lib/chain-cache';
 import { getLlmUsage } from '../lib/llm-budget';
-import { getCronStatus } from '../cron/registry';
+import { getAdminCronsStatus, listCronJobRuns } from '../cron/freshness';
+import { isJobName } from '../cron/jobs';
+import { CRON_RUN_OUTCOMES, type CronRunOutcome } from '../cron/registry';
 import { AppError } from '../middlewares/error.middleware';
 import {
   ADMIN_ROLES,
@@ -255,7 +257,7 @@ export async function getSystemStatus(_req: Request, res: Response): Promise<voi
       rpcLatestLedger: typeof latestLedger === 'number' ? latestLedger : null,
       lagLedgers: typeof latestLedger === 'number' && indexer.lastLedger !== null ? latestLedger - indexer.lastLedger : null,
     },
-    crons: getCronStatus(),
+    crons: await getAdminCronsStatus(),
     chain: {
       mode: config.CHAIN_EXECUTION_MODE,
       agentPublicKey: agentSigner().publicKey ?? null,
@@ -435,4 +437,31 @@ export async function cancelDisputeTx(req: Request, res: Response): Promise<void
 /** POST /admin/disputes/:id/void-tx — unsigned guardian_void_market. */
 export async function voidDisputeTx(req: Request, res: Response): Promise<void> {
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
+}
+
+// ─── Cron Run History (#336) ─────────────────────────────────────────────
+
+/** GET /admin/crons/:job/runs?outcome=&page=&limit= — paginated persisted cron runs. */
+export async function getCronRuns(req: Request, res: Response): Promise<void> {
+  const job = String(req.params.job ?? '');
+  if (!isJobName(job)) {
+    throw new AppError(404, 'JOB_NOT_FOUND', `Unknown cron job: ${job}`);
+  }
+
+  const outcomeParam = req.query.outcome !== undefined ? String(req.query.outcome) : undefined;
+  let outcome: CronRunOutcome | undefined;
+  if (outcomeParam) {
+    if (!(CRON_RUN_OUTCOMES as readonly string[]).includes(outcomeParam)) {
+      throw new AppError(
+        400,
+        'VALIDATION_ERROR',
+        `outcome must be one of: ${CRON_RUN_OUTCOMES.join(', ')}`,
+      );
+    }
+    outcome = outcomeParam as CronRunOutcome;
+  }
+
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const { rows, total } = await listCronJobRuns({ job, outcome, skip, take: limit });
+  sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
 }

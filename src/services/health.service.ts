@@ -14,8 +14,9 @@ import { getRedis } from '../lib/redis';
 import { rpcServer } from './stellar/clients';
 import { CURSOR_ID } from './indexer.service';
 import { latestLedgerView, indexerLag } from './chain-freshness.service';
+import { getCronFreshnessSummary } from '../cron/freshness';
 
-export type ProbeName = 'database' | 'redis' | 'rpc' | 'indexer' | 'pricing';
+export type ProbeName = 'database' | 'redis' | 'rpc' | 'indexer' | 'pricing' | 'crons';
 
 export interface ProbeResult {
   name: ProbeName;
@@ -41,7 +42,7 @@ export interface HealthServiceDeps {
   probes: Probe[];
   ttlMs: number;
   timeoutMs: number;
-  criticality: Record<ProbeName, boolean>;
+  criticality: Partial<Record<ProbeName, boolean>>;
   maxLoopDelayMs?: number;
   now?: () => number;
 }
@@ -73,7 +74,7 @@ export function createHealthService(deps: HealthServiceDeps) {
     const started = now();
     const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
-    const base = { name: probe.name, critical: deps.criticality[probe.name] };
+    const base = { name: probe.name, critical: Boolean(deps.criticality[probe.name]) };
     try {
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -183,6 +184,25 @@ export const defaultProbes: Probe[] = [
       return fresh ? { ok: true, detail } : { ok: false, detail, error: 'price_source_stale' };
     },
   },
+  {
+    name: 'crons',
+    async run() {
+      const summary = await getCronFreshnessSummary();
+      const overdue: string[] = [];
+      const notScheduled: string[] = [];
+      let checked = 0;
+      for (const [job, info] of Object.entries(summary.jobs)) {
+        if (!info.expected.enabled || !info.expected.critical) continue;
+        checked++;
+        if (info.overdue) overdue.push(job);
+        else if (info.state === 'NOT_SCHEDULED') notScheduled.push(job);
+      }
+      const detail = { source: summary.source, checked, overdue, notScheduled };
+      return overdue.length === 0 && notScheduled.length === 0
+        ? { ok: true, detail }
+        : { ok: false, detail, error: overdue.length > 0 ? 'crons_overdue' : 'crons_not_scheduled' };
+    },
+  },
 ];
 
 export const health = createHealthService({
@@ -195,6 +215,7 @@ export const health = createHealthService({
     rpc: config.HEALTH_CRITICAL.includes('rpc'),
     indexer: config.HEALTH_CRITICAL.includes('indexer'),
     pricing: config.HEALTH_CRITICAL.includes('pricing'),
+    crons: config.HEALTH_CRITICAL.includes('crons'),
   },
   maxLoopDelayMs: config.LIVENESS_MAX_LOOP_DELAY_MS,
 });

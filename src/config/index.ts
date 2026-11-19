@@ -87,7 +87,7 @@ const reflectorFeeds = z
   })
   .pipe(z.record(z.string(), z.record(z.string(), reflectorFeedSchema)));
 
-export const PROBE_NAMES = ['database', 'redis', 'rpc', 'indexer'] as const;
+export const PROBE_NAMES = ['database', 'redis', 'rpc', 'indexer', 'pricing', 'crons'] as const;
 
 const probeName = z
   .string()
@@ -481,6 +481,9 @@ export const envObjectSchema = z
     LIVENESS_MAX_LOOP_DELAY_MS: z.string().default('2000').transform(Number),
     // Time /readyz reports "draining" before the HTTP server stops accepting.
     SHUTDOWN_DRAIN_MS: z.string().default('5000').transform(Number),
+
+    // ── Cron run history retention (#336) ─────────────────────────────────
+    CRON_RUNS_RETENTION_DAYS: z.string().default('14').transform(Number).pipe(z.number().int().min(1)),
 
     // ── Semantic dedup (#69) ──────────────────────────────────────────────
     // none keeps the lexical check. The vector column is vector(768): the
