@@ -6,7 +6,16 @@ import hpp from 'hpp';
 
 import { config } from './config';
 import { logger } from './lib/logger';
+import type { RequestContext } from './lib/context';
 import { acceptInboundId, currentContext, newId, runInContext, runWithContext } from './lib/context';
+
+declare global {
+  namespace Express {
+    interface Locals {
+      requestContext?: RequestContext;
+    }
+  }
+}
 import { sendError } from './utils/response.util';
 import { errorMiddleware } from './middlewares/error.middleware';
 import { globalLimiter } from './middlewares/rate-limit.middleware';
@@ -32,6 +41,23 @@ if (config.TRUST_PROXY) {
 
 // BigInt (u64 market ids, i128 amounts) serialises as a decimal string.
 app.set('json replacer', (_key: string, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
+
+// ─── Request correlation (#110, restored for #236) ───
+// Generate a server-side request id for every incoming HTTP request, accept
+// an inbound `X-Request-Id` only if it is well-formed (and only for logs — the
+// durable key is always server-generated), and echo the chosen value back on
+// the response. Every downstream middleware and handler runs inside this
+// context, so logs, LLM calls and durable rows can be joined by `requestId`.
+app.use((req, res, next) => {
+  const raw = req.get('x-request-id');
+  const inbound = acceptInboundId(raw);
+  const requestId = newId('req');
+  res.setHeader('X-Request-Id', inbound ?? requestId);
+  runWithContext({ requestId, kind: 'http', clientRequestId: inbound }, () => {
+    res.locals.requestContext = currentContext();
+    next();
+  });
+});
 
 // ─── Liveness / Readiness (#111) ───
 // Before the rate limiter, compression and CORS: orchestrators poll often from one IP.
