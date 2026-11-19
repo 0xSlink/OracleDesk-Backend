@@ -1012,3 +1012,55 @@ The API sets declarative cache policies and strong ETags across all endpoints vi
 - Requests with matching `If-None-Match` are terminated with `304 Not Modified` and skip controller execution.
 - Requests containing an `Authorization` header always receive `private` Cache-Control to avoid shared cache contamination.
 
+
+## Fault-injection testing
+
+`tests/fault-injection.test.ts` covers two value-moving flows with deterministic, in-process doubles — no network, Postgres or Redis required.
+
+### Seams
+
+| Seam | File | Used for |
+|------|------|----------|
+| `setTransactionReader` | `src/services/stellar/tx-inspect.ts` | Scripted per-hash RPC poll timelines |
+| `setTransactionSender` | `src/services/stellar/tx-inspect.ts` | Scripted send results |
+| `setChainOverrides` | `src/services/chain.service.ts` | Replacing submitWrite / acceptSend / confirmSubmitted |
+| `OutboxStore` | `src/services/stellar/outbox.ts` | In-memory store; no DB |
+| `RecoverDeps` | `src/services/chain.service.ts` | Injecting store + server into recovery paths |
+
+### Scenarios
+
+**Payment verification (P1-P8)**
+
+| ID | Description |
+|----|-------------|
+| P1 | NOT_FOUND then SUCCESS — verification converges |
+| P2 | Persistent NOT_FOUND — never marks permanently failed |
+| P3 | Timeout then SUCCESS — transient error surfaces, then resolves |
+| P4 | FAILED status — not accepted as SUCCESS |
+| P5 | SUCCESS with missing envelopeXdr — surfaced, not silently trusted |
+| P6 | Idempotent re-call — same transaction, never double-counted |
+| P7 | Ledger field present — EXPIRED uses ledger sequence, not wall clock |
+| P8 | Reader restored after test — seam invariant verified |
+
+**Chain writes (C1-C7)**
+
+| ID | Description |
+|----|-------------|
+| C1 | New outbox row starts as PENDING |
+| C2 | PENDING → SUBMITTED transition persisted |
+| C3 | Transient send failure — row stays PENDING, not FAILED |
+| C4 | NOT_FOUND after send — row stays SUBMITTED until confirmation |
+| C5 | SUCCESS confirmation — row moves to CONFIRMED |
+| C6 | findPending filters by status correctly |
+| C7 | Virtual clock advances deterministically |
+
+### Invariants
+
+| ID | Description |
+|----|-------------|
+| I1 | No unhandled rejection after a scenario |
+| I2 | Reader / sender / chain overrides restored after every test |
+| I3 | A transient RPC failure never permanently marks a payment or write failed |
+| I4 | An idempotent re-call never double-counts money or events |
+| I5 | EXPIRED is derived from ledger sequence, not a wall-clock guess |
+| I6 | A SUCCESS response is only trusted once it passes envelope validation |
