@@ -181,6 +181,8 @@ model User {
   refunds       Refund[]
   entitlementTokens EntitlementToken[]
   x402Settlements X402Settlement[]
+  premiumDevices PremiumDevice[]
+  premiumUsageDaily PremiumUsageDaily[]
 
   @@index([walletAddress])
   @@map("users")
@@ -227,6 +229,16 @@ model Market {
   resolutionHash     String?
   /// Revealed preimage of resolutionHash, kept so it can be registered with the resolver.
   resolutionSpec     Json?
+  /// Commitment scheme used to compute resolutionHash: 'legacy' | 'v2' | 'scaled' | 'twap' (ADR 0004).
+  /// CHECK: markets_resolution_scheme_values (resolution_scheme IN ('legacy','v2','scaled','twap'))
+  resolutionScheme   String    @default("legacy")
+  /// Random 32-byte salt (hex) for V2 commitments. NULL for legacy/scaled/twap.
+  /// Never served in API responses before reveal.
+  resolutionSalt     String?
+  /// sha256(STELLAR_NETWORK_PASSPHRASE) hex — binds V2 hashes to a network.
+  resolutionNetworkId String?
+  /// Contract address of the market-core this hash was committed against (V2 only).
+  resolutionMarketCore String?
   /// Seed policy inputs, bounds, binding constraint and expected LP loss (#82).
   seedPolicy         Json?
   /// Highest ledger whose chain state this row reflects; guards writes from the indexer and the reconciler (#83).
@@ -1387,11 +1399,24 @@ model DisputeReview {
   acknowledgedAt     DateTime?
   /// FINALIZED | CANCELLED | null
   resolvedAs         String?
+  /// Market category at review time, for calibration slicing (#247).
+  category           MarketCategory?
+  /// LlmProvenance JSON returned by callLLMStructured (#247).
+  evaluatorProvenance Json?
+  /// 'primary' | 'news' | 'none' — derived from evidence.items (#247).
+  evidenceClass      String?
+  /// 'YES' | 'NO' | 'VOID' — set by labelReviews once the market is final (#247).
+  finalOutcome       String?
+  /// True when proposedOutcome === finalOutcome for FINALIZED reviews (#247).
+  proposalCorrect    Boolean?
+  /// Set when this review has been labelled against chain-final ground truth (#247).
+  labelledAt         DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
   @@index([verdict])
   @@index([onChainMarketId])
+  @@index([labelledAt])
   @@map("dispute_reviews")
 }
 
@@ -1471,4 +1496,35 @@ model WalletPnlDirtyMarket {
   reason          String?
 
   @@map("wallet_pnl_dirty_markets")
+/// Tracks premium session devices per user to enforce the concurrent-device cap (#288).
+model PremiumDevice {
+  id           String   @id @default(uuid())
+  userId       String
+  /// sha-256(deviceKey) so the raw secret never touches the DB
+  deviceKeyHash String
+  label        String   @default("Device")
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceKeyHash])
+  @@index([userId])
+  @@map("premium_devices")
+}
+
+/// Per-user, per-day premium usage budget (#288).
+model PremiumUsageDaily {
+  id           String   @id @default(uuid())
+  userId       String
+  date         DateTime @db.Date
+  traceReads   Int      @default(0)
+  keyReleases  Int      @default(0)
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("premium_usage_daily")
 }

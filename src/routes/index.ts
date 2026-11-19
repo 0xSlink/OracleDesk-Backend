@@ -8,6 +8,7 @@ import oracleRoutes    from './oracle.routes';
 import adminRoutes     from './admin.routes';
 import reportRoutes    from './reports.routes';
 import agentsRoutes    from './agents.routes';
+import accountRoutes   from './account.routes';
 import { noStore } from '../middlewares/cache.middleware';
 
 const router = Router();
@@ -29,5 +30,6 @@ router.use('/oracle',    oracleRoutes);
 router.use('/admin',     adminRoutes);
 router.use('/reports',   reportRoutes);
 router.use('/agents',    agentsRoutes);
+router.use('/account',   accountRoutes);
 
 export default router;

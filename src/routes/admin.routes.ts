@@ -92,4 +92,11 @@ router.get('/reconciliation/runs', listReconciliationRuns);
 router.get('/reconciliation/runs/:id', getReconciliationRun);
 router.post('/reconciliation/run', triggerReconciliationRun);
 
+// Portfolio risk snapshots (#280)
+import { getRiskPortfolio, getRiskPortfolioHistory, runRiskPortfolio } from '../controllers/risk.controller';
+import { idempotent } from '../middlewares/idempotency.middleware';
+router.get('/risk/portfolio', requirePermission('admin.read'), getRiskPortfolio);
+router.get('/risk/portfolio/history', requirePermission('admin.read'), getRiskPortfolioHistory);
+router.post('/risk/portfolio/run', requirePermission('agents.manage'), idempotent(), runRiskPortfolio);
+
 export default router;
