@@ -24,7 +24,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force --skip-seed && npm run db:seed",
     "snapshot:export": "tsx scripts/snapshot-export.ts",
-    "reconcile:post-restore": "tsx scripts/post-restore-reconcile.ts"
+    "reconcile:post-restore": "tsx scripts/post-restore-reconcile.ts",
+    "gen:schemas": "tsx scripts/gen-schemas.ts",
+    "check:schemas": "tsx scripts/gen-schemas.ts --check"
   },
   "keywords": [],
   "author": "",

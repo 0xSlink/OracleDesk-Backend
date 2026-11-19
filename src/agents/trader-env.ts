@@ -13,6 +13,7 @@ import { exitPosition } from '../services/exit.service';
 import { markOpenPositions } from '../services/valuation.service';
 import { checkCorrelation } from '../services/correlation.service';
 import { evidenceFromSignals, generateReasoningTrace } from '../services/reasoning.service';
+import type { ProvenanceEntry } from '../lib/llm/provenance';
 import { detectHedgeOpportunities, autoHedge, enforceStopLoss } from '../services/hedging.service';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
@@ -230,6 +231,17 @@ export function prodTraderEnv(): TraderEnv {
     },
 
     async buy(order) {
+      // #235: thread the forecaster's full LLM provenance through the trace,
+      // ahead of the hedge-conditions call. Without this, every TRADER
+      // trace's `provenance.llm` only lists the hedge-conditions prompt,
+      // and attribution grouped by provider/model/promptVersion silently
+      // reports the hedge model instead of the forecast one.
+      const forecastProvenance = (order.forecast.ensemble?.members ?? [])
+        .flatMap((m) => {
+          const detail = m.detail as { provenance?: unknown } | undefined;
+          return Array.isArray(detail?.provenance) ? (detail!.provenance as ProvenanceEntry[]) : [];
+        });
+
       // Generate reasoning trace BEFORE executing
       const { trace, tracePayload } = await generateReasoningTrace({
         marketId:            order.marketId,
@@ -249,7 +261,7 @@ export function prodTraderEnv(): TraderEnv {
           method:     order.correlation.method ?? 'matrix',
           snapshotId: order.correlation.snapshotId ?? null,
         },
-      });
+      }, { upstreamProvenance: forecastProvenance });
 
       // Execute trade (Never abort between chain write and DB update)
       await executeTrade({

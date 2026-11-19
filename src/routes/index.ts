@@ -9,6 +9,7 @@ import adminRoutes     from './admin.routes';
 import reportRoutes    from './reports.routes';
 import agentsRoutes    from './agents.routes';
 import accountRoutes   from './account.routes';
+import schemasRoutes   from './schemas.routes';
 import { noStore } from '../middlewares/cache.middleware';
 
 const router = Router();
@@ -31,5 +32,6 @@ router.use('/admin',     adminRoutes);
 router.use('/reports',   reportRoutes);
 router.use('/agents',    agentsRoutes);
 router.use('/account',   accountRoutes);
+router.use('/schemas',   schemasRoutes);
 
 export default router;

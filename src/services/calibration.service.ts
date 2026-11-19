@@ -368,10 +368,35 @@ export async function extractRows(db: Db, since: Date | null): Promise<TraceRow[
            t."createdAt"                              AS "createdAt",
            m."resolvedAt"                             AS "resolvedAt",
            m."resolvedOutcome"::int                   AS "o",
-           CASE WHEN t."provenance"->'llm'->0->>'promptId' IS NULL THEN NULL
-                ELSE (t."provenance"->'llm'->0->>'promptId') || '@' || COALESCE(t."provenance"->'llm'->0->>'promptVersion', '?')
+           -- #235: TRADER traces now carry the forecast call's provenance
+           -- first (ahead of hedge-conditions). Pick that entry when present
+           -- so calibration grouped by promptVersion/model reports the
+           -- forecast prompt, not the hedge model. MARKET_MAKER and legacy
+           -- rows keep the previous behaviour of picking llm->0.
+           CASE
+             WHEN (
+               SELECT e->>'promptId'
+               FROM jsonb_array_elements(t."provenance"->'llm') AS e
+               WHERE e->>'promptId' = 'forecast'
+               LIMIT 1
+             ) IS NOT NULL THEN (
+               SELECT (e->>'promptId') || '@' || COALESCE(e->>'promptVersion', '?')
+               FROM jsonb_array_elements(t."provenance"->'llm') AS e
+               WHERE e->>'promptId' = 'forecast'
+               LIMIT 1
+             )
+             WHEN t."provenance"->'llm'->0->>'promptId' IS NULL THEN NULL
+             ELSE (t."provenance"->'llm'->0->>'promptId') || '@' || COALESCE(t."provenance"->'llm'->0->>'promptVersion', '?')
            END                                        AS "promptVersion",
-           t."provenance"->'llm'->0->>'model'         AS "model"
+           COALESCE(
+             (
+               SELECT e->>'model'
+               FROM jsonb_array_elements(t."provenance"->'llm') AS e
+               WHERE e->>'promptId' = 'forecast'
+               LIMIT 1
+             ),
+             t."provenance"->'llm'->0->>'model'
+           )                                           AS "model"
     FROM reasoning_traces t
     JOIN markets m ON m.id = t."marketId"
     WHERE m.status = 'RESOLVED'

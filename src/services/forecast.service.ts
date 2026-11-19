@@ -31,6 +31,7 @@ import { LlmBudgetExceeded } from '../lib/llm-budget';
 import { defineStructured } from '../lib/llm-schema';
 import { forecastV1 } from '../lib/prompts';
 import { canonicalJson, sha256Hex, verifyTraceHash } from '../utils/hash.util';
+import type { LlmProvenance } from '../lib/llm/provenance';
 import { fetchIpfsBytes } from './ipfs.service';
 import { meaningfulTokens, tokenOverlap } from './market-policy';
 import { partitionSignals, renderUntrustedBlock, renderUntrustedRecord, sanitizeSignal, sanitizeSignalText } from './llm-guard.service';
@@ -288,7 +289,7 @@ export function llmForecaster(session: ForecastSession, samples: number = config
     name: 'llm',
     async forecast(input) {
       const { system, user, citations } = buildForecastPrompt(input);
-      const outputs: Array<{ value: LlmForecastOutput; model: string }> = [];
+      const outputs: Array<{ value: LlmForecastOutput; model: string; provenance: LlmProvenance }> = [];
       for (let i = 0; i < samples; i++) {
         if (!session.takeLlmCall()) {
           logger.info({ marketId: input.marketId, llmCalls: session.llmCalls }, 'Forecast LLM call cap reached for this cycle');
@@ -301,7 +302,11 @@ export function llmForecaster(session: ForecastSession, samples: number = config
             task: 'forecasting',
             prompt: { id: forecastV1.id, version: forecastV1.version, hash: forecastV1.contentHash },
           });
-          outputs.push({ value: result.value, model: `${result.provider}:${result.model}` });
+          outputs.push({
+            value: result.value,
+            model: `${result.provider}:${result.model}`,
+            provenance: result.provenance,
+          });
         } catch (err) {
           if (err instanceof LlmBudgetExceeded) {
             logger.warn({ marketId: input.marketId }, 'LLM budget exhausted — no forecast');
@@ -334,6 +339,10 @@ export function llmForecaster(session: ForecastSession, samples: number = config
           adjustments: first.adjustments.map((a) => ({ ...a, signalId: citations[a.signal_id] ?? null })),
           interval50: [first.p_low_50, first.p_high_50],
           samples: outputs.length,
+          // The full provenance of each forecast call (#235), so attribution
+          // and trader-trace provenance can report the forecast prompt and
+          // provider, not just the hedge-conditions call.
+          provenance: outputs.map((o) => o.provenance),
           ...(outputs.length > 1 ? { sampleP: ps } : {}),
         },
       };

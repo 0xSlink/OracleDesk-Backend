@@ -130,6 +130,16 @@ export const MARKET_CATEGORIES = [
   'FED', 'ECB', 'ELECTION', 'GEOPOLITICAL', 'CRYPTO', 'MACRO', 'SPORTS', 'ENTERTAINMENT', 'POLITICS',
 ] as const;
 
+/**
+ * Bounds on `minimum_liquidity_usdc` enforced at the LLM boundary (#239).
+ * The model emits a number; the backend converts it exactly once to a raw
+ * bigint via `proposalLiquidityRaw` below, so no float arithmetic ever
+ * touches the money path. Values outside `[LIQ_MIN, LIQ_MAX]` or with more
+ * than two decimal places are rejected rather than silently clamped.
+ */
+export const LIQ_MIN_USDC = 10;
+export const LIQ_MAX_USDC = 100_000;
+
 /** What the model must produce. Strict: a bad currency is an error, not masked. */
 export const marketProposalWireSchema = z.object({
   market_question: z.string().min(10),
@@ -137,7 +147,14 @@ export const marketProposalWireSchema = z.object({
   resolution_oracle: z.string().min(1),
   expiry_timestamp: z.number().int().positive(),
   settlement_currency: z.literal('USDC'),
-  minimum_liquidity_usdc: z.number().positive(),
+  minimum_liquidity_usdc: z
+    .number()
+    .finite()
+    .min(LIQ_MIN_USDC)
+    .max(LIQ_MAX_USDC)
+    .refine((n) => Number.isInteger(n * 100), {
+      message: `minimum_liquidity_usdc must have at most 2 decimal places`,
+    }),
   category: z.enum(MARKET_CATEGORIES),
   confidence_interval: z.object({ lower: z.number(), upper: z.number() }),
   reasoning: z.string().min(1),
@@ -157,13 +174,36 @@ export const marketProposalWireSchema = z.object({
 /**
  * Domain parse, lenient where intended: the currency is always USDC and the
  * minimum liquidity defaults to 100 when an older producer omitted them.
+ * The boundary checks on `minimum_liquidity_usdc` inherited from
+ * `marketProposalWireSchema.extend()` still apply to the default.
  */
 export const marketProposalSchema = marketProposalWireSchema.extend({
   settlement_currency: z.literal('USDC').catch('USDC'),
-  minimum_liquidity_usdc: z.number().positive().default(100),
+  minimum_liquidity_usdc: z
+    .number()
+    .finite()
+    .min(LIQ_MIN_USDC)
+    .max(LIQ_MAX_USDC)
+    .refine((n) => Number.isInteger(n * 100), {
+      message: `minimum_liquidity_usdc must have at most 2 decimal places`,
+    })
+    .default(100),
 });
 
 export type MarketProposalWire = z.infer<typeof marketProposalWireSchema>;
+
+/**
+ * Converts a validated proposal's `minimum_liquidity_usdc` to a raw bigint
+ * (USDC × 10^7, the on-chain unit) through a fixed-decimal string, exactly
+ * once. The seed policy and the chain writer take only `bigint` from here.
+ */
+export function proposalLiquidityRaw(
+  p: Pick<MarketProposalWire, 'minimum_liquidity_usdc'>,
+): bigint {
+  // Lazy import avoids a circular dep at module load.
+  const { parseUsdc } = require('./amounts') as typeof import('./amounts');
+  return parseUsdc(p.minimum_liquidity_usdc.toFixed(2));
+}
 
 /** The probability must lie inside a non-empty confidence interval. */
 export function confidenceIntervalError(
