@@ -1451,6 +1451,63 @@ model AlertDelivery {
   @@map("alert_deliveries")
 }
 
+/// Per-wallet open position for a prediction market outcome (#155).
+/// PK matches wallet_positions_pkey from 20261017100002_wallet_pnl.
+model WalletPosition {
+  wallet          String
+  onChainMarketId BigInt
+  outcome         String
+  shares          Decimal  @default(0) @db.Decimal(39, 0)
+  costBasis       Decimal  @default(0) @db.Decimal(39, 0)
+  realizedPnl     Decimal  @default(0) @db.Decimal(39, 0)
+  boughtCollateral Decimal @default(0) @db.Decimal(39, 0)
+  soldCollateral  Decimal  @default(0) @db.Decimal(39, 0)
+  feesPaid        Decimal  @default(0) @db.Decimal(39, 0)
+  redeemed        Decimal  @default(0) @db.Decimal(39, 0)
+  tradeCount      Int      @default(0)
+  lastEventId     String   @default("")
+  settled         Boolean  @default(false)
+  incomplete      Boolean  @default(false)
+  /// Plain column default — NOT @updatedAt; the service writes this explicitly.
+  updatedAt       DateTime @default(now()) @db.Timestamp(3)
+
+  @@id([wallet, onChainMarketId, outcome], map: "wallet_positions_pkey")
+  @@index([onChainMarketId], map: "wallet_positions_onChainMarketId_idx")
+  @@map("wallet_positions")
+}
+
+/// Daily aggregate stats per wallet and category (#155).
+model WalletStatsDaily {
+  wallet      String
+  day         DateTime @db.Date
+  category    String
+  volume      Decimal  @default(0) @db.Decimal(39, 0)
+  realizedPnl Decimal  @default(0) @db.Decimal(39, 0)
+  fees        Decimal  @default(0) @db.Decimal(39, 0)
+  trades      Int      @default(0)
+  wins        Int      @default(0)
+  losses      Int      @default(0)
+
+  @@id([wallet, day, category], map: "wallet_stats_daily_pkey")
+  @@index([day], map: "wallet_stats_daily_day_idx")
+  @@map("wallet_stats_daily")
+}
+
+/// Deduplication log — one row per trade event already applied (#155).
+model WalletEventApplied {
+  eventId   String   @id(map: "wallet_events_applied_pkey")
+  appliedAt DateTime @default(now()) @db.Timestamp(3)
+
+  @@map("wallet_events_applied")
+}
+
+/// Markets flagged for PnL recalculation (#155).
+model WalletPnlDirtyMarket {
+  onChainMarketId BigInt   @id(map: "wallet_pnl_dirty_markets_pkey")
+  dirtiedAt       DateTime @default(now()) @db.Timestamp(3)
+  reason          String?
+
+  @@map("wallet_pnl_dirty_markets")
 /// Short-lived exclusive hold on a question that prevents concurrent cycles
 /// from creating duplicate markets. Rows are HELD until the market is inserted
 /// (then COMMITTED), or released on skip/abort/failure.
