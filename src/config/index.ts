@@ -155,6 +155,17 @@ export const envObjectSchema = z
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     // Process role for split Kubernetes deployments (#272): all (default), api, indexer, or worker.
     PROCESS_ROLE: z.enum(['all', 'api', 'indexer', 'worker']).default('all'),
+    // Multi-provider IPFS replication and hedged gateway settings (#271).
+    IPFS_PROVIDERS: commaList(z.enum(['pinata', 'kubo', 'psa']), 'pinata'),
+    IPFS_KUBO_API_URL: optionalString,
+    IPFS_KUBO_AUTH: optionalString,
+    IPFS_PSA_ENDPOINT: optionalString,
+    IPFS_PSA_TOKEN: optionalString,
+    IPFS_MIN_REPLICAS: z.string().default('1').transform(Number).pipe(z.number().int().min(1).max(10)),
+    IPFS_GATEWAYS: commaList(z.string().url(), ''),
+    IPFS_HEDGE_DELAY_MS: z.string().default('750').transform(Number).pipe(z.number().int().min(50).max(30000)),
+    IPFS_SINGLE_BLOCK_MAX: z.string().default('262144').transform(Number).pipe(z.number().int().min(1024).max(1048576)),
+    IPFS_RECHECK_HOURS: z.string().default('24').transform(Number).pipe(z.number().int().min(1).max(720)),
     // Fail boot (instead of warning) on deprecated, reserved or unknown
     // prefixed variables (#243).
     CONFIG_STRICT: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
@@ -811,6 +822,13 @@ export const envSchema = envObjectSchema
     }
     if (env.NODE_ENV === 'production' && env.IPFS_TRANSPORT === 'local') {
       ctx.addIssue({ code: 'custom', path: ['IPFS_TRANSPORT'], message: 'local IPFS is development-only' });
+    }
+    if (env.NODE_ENV === 'production' && env.IPFS_MIN_REPLICAS < 2) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['IPFS_MIN_REPLICAS'],
+        message: 'must be >= 2 in production for redundant IPFS pin replication',
+      });
     }
     if (env.PROCESS_ROLE === 'indexer') {
       if (!env.INDEXER_ENABLED) {

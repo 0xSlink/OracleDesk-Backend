@@ -126,6 +126,18 @@ subdomain, add an edge reverse-proxy rule on `SEP7_ORIGIN_DOMAIN` forwarding
 `/.well-known/stellar.toml` to the backend. See
 `docs/runbooks/treasury-sep7.md` for key rotation steps.
 
+## IPFS Multi-Provider Replication & Hedged Gateways (#271)
+
+Configure redundant pinning via `IPFS_PROVIDERS` (`pinata`, `kubo`, `psa`),
+`IPFS_KUBO_API_URL` / `IPFS_KUBO_AUTH`, `IPFS_PSA_ENDPOINT` / `IPFS_PSA_TOKEN`,
+and `IPFS_MIN_REPLICAS` (required to be `>= 2` in production). All pinned JSON
+documents are capped at `IPFS_SINGLE_BLOCK_MAX` (256 KiB) so every provider
+produces the identical CIDv1 raw/sha2-256 digest (`cidForBytes`). Reads use
+health-scored hedged gateways (`IPFS_GATEWAYS`, `IPFS_HEDGE_DELAY_MS`) and
+verify bytes before accepting them. Local `ipfs_content` rows are never evicted
+while any `ipfs_pins` entry is not `PINNED`, and `GET /api/v1/admin/status`
+exposes the live replication summary.
+
 ## Migrations
 
 ### Naming convention

@@ -13,6 +13,7 @@ import { purgeSignalStore } from '../services/signal-store.service';
 import { expireReservations } from '../services/market-reservation.service';
 import { recordCronRun } from './registry';
 import { computeAndStoreRiskSnapshot } from '../services/portfolio-risk.service';
+import { runIpfsReplicationJob } from '../jobs/ipfs-replication.job';
 
 let runningTraderCycleId: string | null = null;
 let correlationSnapshotRunning = false;
@@ -89,6 +90,18 @@ export function startMonitorCron(): void {
       logger.error({ err }, 'Monitor cron: trader cycle failed');
     } finally {
       runningTraderCycleId = null;
+    }
+  }));
+
+  // IPFS pin replication and repair (#271) — hourly under a Postgres advisory lock.
+  cron.schedule('25 * * * *', () => tick('ipfs-replication', async () => {
+    const startedAt = new Date();
+    try {
+      await runIpfsReplicationJob();
+      recordCronRun('ipfs-replication', 'success', startedAt, new Date());
+    } catch (err) {
+      recordCronRun('ipfs-replication', 'failure', startedAt, new Date(), err);
+      logger.error({ err }, 'Monitor cron: IPFS replication job failed');
     }
   }));
 

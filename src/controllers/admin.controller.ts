@@ -27,6 +27,7 @@ import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat
 import { getFeeOracle } from '../services/stellar/fees';
 import { getLlmUsage } from '../lib/llm-budget';
 import { getCronStatus } from '../cron/registry';
+import { getReplicationSummary } from '../jobs/ipfs-replication.job';
 import { AppError } from '../middlewares/error.middleware';
 import {
   ADMIN_ROLES,
@@ -267,6 +268,7 @@ export async function getSystemStatus(_req: Request, res: Response): Promise<voi
       lagLedgers: typeof latestLedger === 'number' && indexer.lastLedger !== null ? latestLedger - indexer.lastLedger : null,
     },
     crons: getCronStatus(),
+    ipfsReplication: await getReplicationSummary().catch(() => null),
     chain: {
       mode: config.CHAIN_EXECUTION_MODE,
       agentPublicKey: agentSigner().publicKey ?? null,

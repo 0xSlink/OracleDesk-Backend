@@ -1661,3 +1661,25 @@ model Sep7Request {
   @@unique([operationId, signer])
   @@map("sep7_requests")
 }
+
+enum IpfsPinState {
+  PENDING
+  PINNING
+  PINNED
+  MISSING
+  FAILED
+}
+
+/// Per-CID, per-provider replication state for anchored IPFS documents (#271).
+model IpfsPin {
+  cid           String
+  provider      String
+  state         IpfsPinState @default(PENDING)
+  attempts      Int          @default(0)
+  lastError     String?
+  lastCheckedAt DateTime?
+  pinnedAt      DateTime?
+
+  @@id([cid, provider])
+  @@map("ipfs_pins")
+}

@@ -19,6 +19,8 @@ export const SECRET_NAMES = [
   'AUTH_SIGNING_SECRET',
   'PINATA_API_KEY',
   'PINATA_SECRET_API_KEY',
+  'IPFS_KUBO_AUTH',
+  'IPFS_PSA_TOKEN',
   'ANTHROPIC_API_KEY',
   'GEMINI_API_KEY',
   'NEWSAPI_KEY',
@@ -60,6 +62,8 @@ interface ResolvedSecrets {
   AUTH_SIGNING_SECRET: string;
   PINATA_API_KEY: string;
   PINATA_SECRET_API_KEY: string;
+  IPFS_KUBO_AUTH?: string;
+  IPFS_PSA_TOKEN?: string;
   ANTHROPIC_API_KEY: string;
   GEMINI_API_KEY: string;
   NEWSAPI_KEY: string;
