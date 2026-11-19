@@ -69,3 +69,43 @@ DIGEST=<sha256> ./scripts/post-deploy-checks.sh
 ```
 
 Checks are read-only. `SKIP_KUBE=1` omits the digest check in local tests.
+
+## Migrations
+
+### Naming convention
+
+Every new migration folder must start with a 14-digit timestamp prefix (`YYYYMMDDHHMMSS`) followed by `_` and a descriptive slug, e.g. `20261019140000_payment_intents`. The prefix must be **strictly greater** than every existing prefix. Duplicate prefixes break Prisma's lexical ordering and are caught by `npm run lint:migrations`.
+
+### Checking for drift
+
+`npm run check:drift` applies all migrations to a shadow database, then diffs in both directions between the applied schema and `prisma/schema.prisma`. It fails if any object appears in one side but not the other and is not listed in `prisma/drift-allowlist.json`.
+
+Run locally:
+
+```bash
+# auto-creates oracledesk_shadow_<pid> and drops it on exit
+DATABASE_URL=postgresql://... npm run check:drift
+
+# or supply your own shadow DB
+DATABASE_URL=postgresql://... SHADOW_DATABASE_URL=postgresql://...shadow npm run check:drift
+```
+
+### Drift allowlist (`prisma/drift-allowlist.json`)
+
+Objects intentionally managed outside the datamodel (HNSW indexes, partial uniques, the `vector` extension) are listed here with a `reason`. Temporary entries carry an `expires` date; `check:drift` fails once that date has passed to prevent exemptions from going stale.
+
+### Renumbering collision prefixes
+
+The `prisma/migration-renames.json` map lists all historical prefix collisions and their unique replacements. Before deploying to a fresh environment or after a restore, run:
+
+```bash
+# Update _prisma_migrations rows (idempotent — safe to run twice)
+DATABASE_URL=postgresql://... node scripts/renumber-migrations.mjs --apply-db
+
+# Then rename the folders (only needed once per checkout)
+node scripts/renumber-migrations.mjs --apply-fs
+```
+
+**Rollback:** swap `from` and `to` in the map and re-run `--apply-db` on the database, then `--apply-fs` on the checkout. The file contents (and their checksums) are unchanged, so Prisma's integrity check is unaffected.
+
+**Order matters:** run `--apply-db` _before_ `prisma migrate deploy` so the applied-name rows match the folder names.
