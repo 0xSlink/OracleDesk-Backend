@@ -1086,12 +1086,14 @@ The Socket.io server enforces connection security, buffer limits, and outbound t
 - **Connection caps:** Distributed per-IP and global caps are enforced atomically via Redis Lua scripts with local in-memory fallback. `SOCKET_IP_EXEMPT_CIDRS` allows operators to exempt specific NAT or monitoring ranges from per-IP connection limits.
 - **Outbound Throttling & Degraded Mode:** Sockets buffering beyond `SOCKET_SLOW_WARN_BYTES` are removed from the `realtime:full` room and only receive coalesced `MARKET_PRICE` ticks. Sockets buffering beyond `SOCKET_SLOW_DROP_BYTES` are disconnected to prevent heap exhaustion.
 
-## Chain read cache (#98)
+## Chain read cache (#98, #330)
 
-Simulations of live contract state (`get_market`, `state`, `available_capital`) are cached in Redis via `src/lib/chain-cache.ts`:
+Simulations of live contract state (`get_market`, `state`, `available_capital`) are cached in Redis via `src/lib/chain-cache.ts` (with an in-memory fallback):
 - **Lossless Codec:** Typed tagged representations preserve `bigint`, `Buffer`/`Uint8Array`, and tagged enum variants across round-trips.
-- **Tag Generation Invalidation:** Invalidation avoids key scans by incrementing generation counters (`chain:gen:<tag>`). Each cached entry records its tags' generations at read time.
-- **Ledger Invalidation & Single-Flight:** Invalidation tracks `chain:minLedger:<tag>`, ensuring simulation results read from older ledgers are never written back over fresher events. Cross-instance single-flight locks prevent stampeding RPC nodes during concurrent cache misses.
+- **Pre-Load Generation Capture & Atomic Store:** Tag generations (`chain:gen:<tag>`) are snapshotted *before* invoking the RPC loader. When storing, both the memory cache and Redis (`STORE_IF_GEN_LUA`) verify that generations have not changed, no write intent is active, and the loaded ledger meets or exceeds every tag's minimum ledger and any existing cached entry's ledger. An overlapping invalidation returns the value uncached (`genRaceRejects`, `staleRejects`) instead of overwriting fresh state.
+- **Monotonic Minimum Ledgers:** `invalidateTag` increments `chain:gen:<tag>` and advances `chain:minLedger:<tag>` atomically with a monotonic max (`INVALIDATE_TAG_LUA`), so late indexer events from older ledgers can never lower the floor.
+- **Write-Confirmation Invalidation & Write Intents:** Every backend write derives its affected tags through `src/services/stellar/write-tags.ts`. Once signed and before `sendTransaction`, `beginWrite` marks active write intents (`chain:intent:<tag>:<token>`, `chain:intentCount:<tag>`) for `OUTBOX_INLINE_WAIT_MS` plus margin (extended by outbox recovery while `PENDING`), causing concurrent readers to bypass the cache (`cached: false, intent: true`, `intentBypasses`). On confirmation (`SUCCESS`, or `FAILED` with a landed `txHash`), `outbox.onConfirmed` awaits `invalidateTag(tag, ledger)` on both the inline and recovery paths before `markHandled`, then clears the write intent (`endWrite`).
+- **Validated Single-Flight & Degraded Recovery:** Cross-instance lock waiters validate entries against current tag generations, minimum ledgers, and intents before serving, and reload directly (`waiterReloads`) if `CHAIN_CACHE_WAIT_MS` elapses. Lock release uses compare-and-delete (`UNLOCK_LUA`). If `invalidateTag` falls back to memory while Redis is unreachable, `degradedSince` invalidates any Redis entry with `readAt < degradedSince` once connectivity resumes. Cache counters are exposed in `GET /admin/status` under `chain.cache`.
 
 ## HTTP Caching & Conditional Requests (#99)
 

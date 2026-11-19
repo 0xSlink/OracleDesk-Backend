@@ -25,6 +25,7 @@ import { indexerStatus } from '../services/indexer.service';
 import { agentSigner } from '../services/stellar/clients';
 import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat';
 import { getFeeOracle } from '../services/stellar/fees';
+import { getChainCache } from '../lib/chain-cache';
 import { getLlmUsage } from '../lib/llm-budget';
 import { getCronStatus } from '../cron/registry';
 import { AppError } from '../middlewares/error.middleware';
@@ -259,6 +260,7 @@ export async function getSystemStatus(_req: Request, res: Response): Promise<voi
       mode: config.CHAIN_EXECUTION_MODE,
       agentPublicKey: agentSigner().publicKey ?? null,
       preflight: 'not_implemented',
+      cache: getChainCache().stats(),
     },
     llm: {
       anthropicConfigured: secret('ANTHROPIC_API_KEY') !== '',

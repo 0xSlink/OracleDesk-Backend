@@ -489,6 +489,7 @@ async function submitTradeTransaction(
     },
     undefined,
     {
+      market_id: market.onChainMarketId!.toString(),
       collateral_in: collateralIn.toString(),
       feeRaw: feeRaw.toString(),
       ...(attemptId ? { attemptId } : {}),
