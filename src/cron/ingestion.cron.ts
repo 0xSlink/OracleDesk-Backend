@@ -9,6 +9,9 @@ import { recordCronRun } from './registry';
 
 let runningCycleId: string | null = null;
 
+/** Returns the current in-progress cycle id, or null if no cycle is running. */
+export function getRunningCycleId(): string | null { return runningCycleId; }
+
 /**
  * Schedules the Market Maker Agent to run every 15 minutes.
  *

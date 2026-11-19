@@ -604,6 +604,10 @@ const envSchema = z
     // Request & cycle deadlines
     HTTP_REQUEST_TIMEOUT_MS: z.string().default('30000').transform(Number),
     CYCLE_DEADLINE_MS: z.string().default('600000').transform(Number),
+    // Must exceed CYCLE_DEADLINE_MS so a live cycle never loses its lease.
+    MARKET_RESERVATION_LEASE_MS: z.string().default('660000').transform(Number).pipe(
+      z.number().refine((v) => v > 600000, { message: 'MARKET_RESERVATION_LEASE_MS must exceed CYCLE_DEADLINE_MS (600000)' }),
+    ),
     IPFS_MAX_BYTES: z.string().default('2097152').transform(Number),
 
     // ── Trace Audit (Issue #150) ──────────────────────────────────────────

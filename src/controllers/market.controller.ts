@@ -7,6 +7,7 @@ import type { JobRecord } from '../types';
 import { JobStatus } from '../types';
 import { sendSuccess, sendError, parsePagination, buildPaginationMeta } from '../utils/response.util';
 import { runMarketMakerCycle } from '../agents/market-maker.agent';
+import { getRunningCycleId } from '../cron/ingestion.cron';
 import { generateMarketSchema, listMarketsSchema } from '../validators/market.validator';
 import { toContractCategory } from '../lib/categories';
 import { parseU64 } from '../lib/amounts';
@@ -207,6 +208,13 @@ export async function triggerMarketGeneration(
 
   // A paused market maker answers 423 immediately instead of starting a job (#79).
   await assertAgentActive('MARKET_MAKER');
+
+  // Refuse if a cycle is already running in this process (#283).
+  const activeCycleId = getRunningCycleId();
+  if (activeCycleId) {
+    sendError(res, 409, 'GENERATION_IN_PROGRESS', 'A generation cycle is already running', { cycleId: activeCycleId });
+    return;
+  }
 
   const jobId = uuidv4();
 

@@ -1413,3 +1413,41 @@ model AlertDelivery {
   @@index([reviewId])
   @@map("alert_deliveries")
 }
+
+/// Short-lived exclusive hold on a question that prevents concurrent cycles
+/// from creating duplicate markets. Rows are HELD until the market is inserted
+/// (then COMMITTED), or released on skip/abort/failure.
+model MarketReservation {
+  id              String    @id @default(uuid())
+  cycleId         String
+  question        String
+  /// sha256(exactKey(question, expiryDay)) — partial unique index enforced in SQL
+  questionKey     String
+  category        MarketCategory
+  expiryTimestamp DateTime  @db.Timestamptz(3)
+  embeddingModel  String?
+  /// JSON array of numbers; compared in-process, never indexed
+  embeddingVector Json?
+  /// HELD | COMMITTED | RELEASED
+  status          String
+  marketId        String?   @unique
+  leaseUntil      DateTime  @db.Timestamptz(3)
+  createdAt       DateTime  @default(now())
+
+  @@index([status, leaseUntil])
+  @@map("market_reservations")
+}
+
+model PortfolioRiskSnapshot {
+  id                     String   @id @default(uuid())
+  computedAt             DateTime @default(now()) @db.Timestamptz(3)
+  correlationSnapshotId  String?
+  inputsHash             String
+  paths                  Int
+  metrics                Json
+  flags                  Json
+  durationMs             Int
+
+  @@index([computedAt])
+  @@map("portfolio_risk_snapshots")
+}
