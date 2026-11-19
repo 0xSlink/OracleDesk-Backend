@@ -197,6 +197,16 @@ const envSchema = z
     AUTH_IP_HASH_SALT: optionalString,
     // Express `trust proxy`; a comma list of hops or addresses, or "true".
     TRUST_PROXY: optionalString,
+    // ── Premium session device cap (#288) ────────────────────────────────
+    PREMIUM_MAX_DEVICES: z.string().default('2').transform(Number)
+      .pipe(z.number().int().min(1).max(20)),
+    PREMIUM_DAILY_READ_LIMIT: z.string().default('200').transform(Number)
+      .pipe(z.number().int().min(1)),
+    PREMIUM_DAILY_KEY_RELEASE_LIMIT: z.string().default('50').transform(Number)
+      .pipe(z.number().int().min(1)),
+    // HyperLogLog distinct-IP-prefix threshold for anomaly alerts.
+    PREMIUM_ANOMALY_IP_THRESHOLD: z.string().default('5').transform(Number)
+      .pipe(z.number().int().min(1)),
     REDIS_COMMAND_TIMEOUT_MS: z.string().default('500').transform(Number)
       .pipe(z.number().int().min(50).max(30000)),
     REDIS_CONNECT_TIMEOUT_MS: z.string().default('2000').transform(Number)
