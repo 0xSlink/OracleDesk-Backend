@@ -188,6 +188,13 @@ export const envObjectSchema = z
     ENTITLEMENT_SIGNING_KEY: optionalString,
     // Dedicated Ed25519 key for signing SEP-7 URI requests (#270); never reused.
     URI_REQUEST_SIGNING_SECRET: optionalString,
+    // Dedicated Ed25519 key for signing reasoning traces (#273); never reused.
+    TRACE_SIGNING_KEY: optionalString,
+    TRACE_SIGNING_PREVIOUS_KEYS: commaList(
+      z.string().regex(/^[0-9a-f]{64}$/i, 'must be a 64-char hex Ed25519 public key'),
+      '',
+    ),
+    TRACE_SIGNING_REQUIRED: boolDefault('false'),
     SEP7_ORIGIN_DOMAIN: optionalString,
     SEP7_CALLBACK_BASE_URL: optionalString,
     SEP7_TOKEN_TTL_SECONDS: z.string().default('3600').transform(Number)
@@ -968,6 +975,50 @@ export const envSchema = envObjectSchema
             path: ['CHANNEL_SECRET_KEYS'],
             message: 'channel secret key must not equal AUTH_SIGNING_SECRET',
           });
+        }
+      }
+    }
+    // ── Trace signing key validation (#273) ──
+    if (env.TRACE_SIGNING_KEY) {
+      let tracePubHex: string | null = null;
+      const trimmed = env.TRACE_SIGNING_KEY.trim();
+      try {
+        if (StrKey.isValidEd25519SecretSeed(trimmed)) {
+          tracePubHex = Buffer.from(Keypair.fromSecret(trimmed).rawPublicKey()).toString('hex');
+        } else if (/^[0-9a-f]{64}$/i.test(trimmed)) {
+          tracePubHex = Buffer.from(Keypair.fromRawEd25519Seed(Buffer.from(trimmed, 'hex')).rawPublicKey()).toString('hex');
+        } else {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['TRACE_SIGNING_KEY'],
+            message: 'must be a Stellar secret seed (S…) or 64-char hex Ed25519 seed',
+          });
+        }
+      } catch {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['TRACE_SIGNING_KEY'],
+          message: 'must be a valid Ed25519 seed',
+        });
+      }
+      if (tracePubHex) {
+        const otherSecrets: Array<[string, string | undefined]> = [
+          ['AGENT_SECRET_KEY', env.AGENT_SECRET_KEY],
+          ['AUTH_SIGNING_SECRET', env.AUTH_SIGNING_SECRET],
+          ['FEE_PAYER_SECRET', env.FEE_PAYER_SECRET],
+          ['URI_REQUEST_SIGNING_SECRET', env.URI_REQUEST_SIGNING_SECRET],
+          ...channelKeys.map((k, idx) => [`CHANNEL_SECRET_KEYS[${idx}]`, k] as [string, string]),
+        ];
+        for (const [label, other] of otherSecrets) {
+          if (!other || !StrKey.isValidEd25519SecretSeed(other)) continue;
+          const otherPubHex = Buffer.from(Keypair.fromSecret(other).rawPublicKey()).toString('hex');
+          if (otherPubHex === tracePubHex) {
+            ctx.addIssue({
+              code: 'custom',
+              path: ['TRACE_SIGNING_KEY'],
+              message: `must differ from ${label}`,
+            });
+          }
         }
       }
     }

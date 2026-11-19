@@ -137,6 +137,8 @@ enum TraceAuditStatus {
   NOT_ON_CHAIN
   FOREIGN_AGENT
   ARCHIVED
+  SIGNATURE_INVALID
+  UNSIGNED
 }
 
 enum AgentType {
@@ -465,6 +467,7 @@ model ReasoningTrace {
   provenance          Json?
   agentWallet         String?
   signature           String?
+  signingKey          String?           @db.Char(64)
   ipfsCid             String?
   /// CHECK: reasoning_traces_trace_hash_format (traceHash IS NULL OR 64 hex chars)
   /// sha256 (hex) of the exact bytes pinned to IPFS.

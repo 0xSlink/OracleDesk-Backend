@@ -28,6 +28,11 @@ import { getFeeOracle } from '../services/stellar/fees';
 import { getLlmUsage } from '../lib/llm-budget';
 import { getCronStatus } from '../cron/registry';
 import { getReplicationSummary } from '../jobs/ipfs-replication.job';
+import {
+  ensureSigningKeyRegistered,
+  retireSigningKey,
+  signingKeyStatus,
+} from '../services/agent-signing-key.service';
 import { AppError } from '../middlewares/error.middleware';
 import {
   ADMIN_ROLES,
@@ -119,6 +124,43 @@ export async function issueOperationSep7(req: Request, res: Response): Promise<v
 export async function getOperationSep7Status(req: Request, res: Response): Promise<void> {
   const requests = await getSep7Status(String(req.params.id));
   sendSuccess(res, { requests });
+}
+
+export async function getChainSigningKeys(_req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await signingKeyStatus());
+}
+
+export async function registerChainSigningKey(req: Request, res: Response): Promise<void> {
+  const mode = req.body?.mode === 'prepare' ? 'prepare' : 'submit';
+  const result = await ensureSigningKeyRegistered({ mode });
+  await prisma.agentLog
+    .create({
+      data: {
+        agentType: 'MARKET_MAKER',
+        level: 'INFO',
+        action: 'SIGNING_KEY_REGISTERED',
+        data: { actor: actor(req), mode, publicKey: result.publicKey, alreadyActive: Boolean(result.alreadyActive) } as object,
+      },
+    })
+    .catch(() => {});
+  sendSuccess(res, result, 201);
+}
+
+export async function retireChainSigningKey(req: Request, res: Response): Promise<void> {
+  const mode = req.body?.mode === 'prepare' ? 'prepare' : 'submit';
+  const publicKey = String(req.params.publicKey ?? '').trim();
+  const result = await retireSigningKey(publicKey, { mode });
+  await prisma.agentLog
+    .create({
+      data: {
+        agentType: 'MARKET_MAKER',
+        level: 'INFO',
+        action: 'SIGNING_KEY_RETIRED',
+        data: { actor: actor(req), mode, publicKey: result.publicKey } as object,
+      },
+    })
+    .catch(() => {});
+  sendSuccess(res, result);
 }
 
 /** GET /admin/agents/controls: effective state per scope plus the last 20 audit events. */

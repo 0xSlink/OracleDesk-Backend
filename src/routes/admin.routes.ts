@@ -12,6 +12,9 @@ import {
   getAgentControls,
   getReconciliationRun,
   getSpecCompat,
+  getChainSigningKeys,
+  registerChainSigningKey,
+  retireChainSigningKey,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -73,6 +76,10 @@ router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), 
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
 // Spec compatibility report from the boot gate (#34): read-only diagnostics.
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
+// Agent trace signing keys (#273): permission- and step-up-guarded only.
+router.get('/chain/signing-keys', requirePermission('chain.signing_keys'), requireStepUp, getChainSigningKeys);
+router.post('/chain/signing-keys/register', requirePermission('chain.signing_keys'), requireStepUp, registerChainSigningKey);
+router.post('/chain/signing-keys/:publicKey/retire', requirePermission('chain.signing_keys'), requireStepUp, retireChainSigningKey);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);
