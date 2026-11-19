@@ -229,6 +229,16 @@ model Market {
   resolutionHash     String?
   /// Revealed preimage of resolutionHash, kept so it can be registered with the resolver.
   resolutionSpec     Json?
+  /// Commitment scheme used to compute resolutionHash: 'legacy' | 'v2' | 'scaled' | 'twap' (ADR 0004).
+  /// CHECK: markets_resolution_scheme_values (resolution_scheme IN ('legacy','v2','scaled','twap'))
+  resolutionScheme   String    @default("legacy")
+  /// Random 32-byte salt (hex) for V2 commitments. NULL for legacy/scaled/twap.
+  /// Never served in API responses before reveal.
+  resolutionSalt     String?
+  /// sha256(STELLAR_NETWORK_PASSPHRASE) hex — binds V2 hashes to a network.
+  resolutionNetworkId String?
+  /// Contract address of the market-core this hash was committed against (V2 only).
+  resolutionMarketCore String?
   /// Seed policy inputs, bounds, binding constraint and expected LP loss (#82).
   seedPolicy         Json?
   /// Highest ledger whose chain state this row reflects; guards writes from the indexer and the reconciler (#83).
