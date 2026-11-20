@@ -52,7 +52,7 @@ export function fakeTraderEnv(opts: {
   markets?: MarketView[];
   forecast?: (m: MarketView) => Forecast | null;
   exposureRaw?: bigint;
-  closedPnl?: number[];
+  closedPnl?: bigint[];
   /** Fraction of the proposed size the correlation check keeps. */
   correlationKeep?: number;
   now?: () => Date;

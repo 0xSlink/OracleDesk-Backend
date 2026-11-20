@@ -242,6 +242,15 @@ const STEPS: Partial<Record<GenerationRunState, StepFn>> = {
       return skip('DUPLICATE', { dedup: { reason: reservation.reason, match: reservation.match ?? null } });
     }
 
+    const market = await prisma.$transaction(async (tx) => {
+      const created = await createMarketFromProposal(proposal, undefined, undefined, tx);
+      await tx.marketGenerationRun.update({
+        where: { id: ctx.run.id },
+        data: { marketId: created.id },
+      });
+      return created;
+    });
+
     return {
       outputs: {
         proposal,

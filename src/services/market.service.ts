@@ -367,7 +367,7 @@ export async function createMarketFromProposal(
   // the dedup reservation) pass their transaction client.
   const client = tx ?? prisma;
 
-  const market = await client.market.create({
+  const market = await (tx ?? prisma).market.create({
     data: {
       question:           proposal.market_question,
       category:           finalCategory,
