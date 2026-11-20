@@ -413,6 +413,19 @@ A daily pass is granted only after `payment-verification.service.ts` reads the t
 
 Each hash is usable once (unique `PaymentEvent.txHash`). There is no development bypass; tests inject a fake RPC reader. Per-trace unlocks are sold by the x402 service in the contracts repo, which the frontend calls directly.
 
+## Money representation (#224)
+
+Payment and allowance money is an integer count of USDC base units (7 decimals), stored as `NUMERIC(39,0)` (or digits-only `TEXT` for `payment_events.amountRaw`) and handled as `bigint` via `src/lib/amounts.ts`: `parseUsdc` (decimal string → base units, rejects exponents and an 8th decimal), `formatUsdc` (base units → display string), `decimalToBigint` (Prisma `Decimal` → `bigint` without a JS number). The exact columns are the only source of truth: `subscriptions.amountPaidRaw`, `payment_events.amountRaw`, `spending_allowances.dailyLimitRaw` / `perTraceLimitRaw` / `spentTodayRaw` / `overageRaw`.
+
+- **Responses.** `toSubscriptionDto`, `toPaymentEventDto` and `toAllowanceDto` in `subscription.service.ts` list their fields explicitly and return each amount as a base-unit string plus a `formatUsdc` display string; a Prisma row is never sent as is, so a Float (or a `Decimal`) cannot leak. Express serialises any `bigint` as a decimal string.
+- **Input.** `PUT /traces/access/allowance` takes base-unit strings or decimal strings; JSON numbers are converted with `parseUsdc(String(n))` for one deprecated release. `usdcFromNumber` is only for legacy float sources and is never trusted on its own: the raw backfill uses it as a candidate compared against the chain.
+- **Float mirrors.** `subscriptions.amountPaid`, `payment_events.amount` and `spending_allowances.dailyLimit` / `perTraceLimit` / `spentToday` are leftovers of #55 being written alongside the exact columns. Nothing reads them. They are removed in three phases so that instances of adjacent releases stay correct during a rolling deploy:
+  1. **Expand** (`20261120020000_payments_raw_expand`): adds `amountPaidRaw` (NOT VALID non-negative CHECK), gives every float `DEFAULT 0`, creates `payment_raw_backfill`. Settlement dual-writes `amountPaidRaw`; `npm run backfill:payment-raw` fills legacy NULLs, verifying each against the on-chain SAC transfer where RPC still has it.
+  2. **Switch** (same release, `PAYMENT_FLOAT_WRITES`): readers, DTOs, snapshots, audits and seeds use raw values only. With `PAYMENT_FLOAT_WRITES=false` writers omit the floats and the defaults apply; an older instance only ever sees `0` in a column it does not read.
+  3. **Contract** (`prisma/migrations-pending/20261120030000_payments_float_contract`): drops the floats and validates the CHECK. It is breaking by design and ships later under `migration:breaking`.
+
+The procedure, preconditions and rollback are in `docs/runbooks/payments-float-contract.md`. Trading and market tables (`Trade`, `Position`, `CopyTrade`, `Market`) still carry floats and are out of scope here.
+
 ## Position valuation (#78)
 
 Agent positions are share counts, not futures-style floats. `agent_buy` returns the shares; the position stores `sharesRaw`, `costBasisRaw` and `feesPaidRaw` (`NUMERIC(39,0)`, converted with `decimalToBigint`, never through a JS number). Each trader cycle starts with `markOpenPositions()`: it reads reserves once per market (newest indexed market-core `Trade` event when the indexer is current, otherwise `get_market`; `fee_bps` is fixed per market and cached) and computes, for the held outcome with `src/generated/fpmm.ts`:

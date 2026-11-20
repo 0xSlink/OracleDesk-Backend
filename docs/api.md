@@ -658,7 +658,8 @@ if **all** of these hold:
 There is no development bypass: an unverifiable payment never grants
 access. Tests inject a fake RPC client.
 
-Response `201`: `{ subscription, trace }`.
+Response `201`: `{ subscription, trace }`, where `subscription` is the
+subscription DTO below (#224).
 Errors: `400 VALIDATION_ERROR`, `402 PAYMENT_NOT_FOUND`,
 `402 PAYMENT_FAILED`, `402 PAYMENT_WRONG_TOKEN`, `402 PAYMENT_WRONG_SENDER`,
 `402 PAYMENT_WRONG_RECIPIENT`, `402 PAYMENT_INSUFFICIENT`,
@@ -670,11 +671,56 @@ Errors: `400 VALIDATION_ERROR`, `402 PAYMENT_NOT_FOUND`,
 > revenue account is probably wanted. This is flagged in `docs/STATUS.md`
 > and not decided here.
 
+#### Money in payment responses (#224)
+
+Payment, subscription and allowance responses carry exact amounts only: each
+amount is a base-unit decimal string (`…Raw`, 7-decimal USDC) plus a display
+string derived from it with `formatUsdc` (`"0.5"`, never a float). The Float
+columns `amountPaid`, `amount`, `dailyLimit`, `perTraceLimit` and `spentToday`
+are no longer returned; they are dropped from the database in a later release.
+A legacy row the raw backfill has not reached yet has `…Raw: null` and
+`…Display: null` rather than a guessed value. Responses replayed by the
+`Idempotency-Key` middleware may still show the old shape until the key
+expires (24 h).
+
+Subscription:
+
+```json
+{
+  "id": "…", "userId": "…", "traceId": null, "type": "DAILY_PASS", "status": "ACTIVE",
+  "amountPaidRaw": "5000000", "amountDisplay": "0.5", "currency": "USDC",
+  "txHash": "…", "purchaseLedger": 123, "startsAt": "…", "endsAt": "…", "expiresAt": "…",
+  "paymentIntentId": null, "createdAt": "…", "updatedAt": "…"
+}
+```
+
+Payment event: `{ id, userId, txHash, type, amountRaw, amountDisplay,
+fromAddress, currency, status, traceId, ledger, ledgerCloseTime,
+allowanceOverage, allowanceOverageRaw, paymentIntentId, metadata, createdAt,
+confirmedAt }`.
+
+Allowance: `{ id, userId, dailyLimitRaw, perTraceLimitRaw, spentTodayRaw,
+overageRaw, dailyLimitDisplay, perTraceLimitDisplay, spentTodayDisplay,
+overageDisplay, windowStartedAt, currency, lastResetAt, isActive, createdAt,
+updatedAt }`.
+
 #### `GET /traces/access/allowance`, `PUT /traces/access/allowance` (auth)
 
-`PUT` body `{ dailyLimit: number, perTraceLimit: number, dailyLimitRaw?: "base units", perTraceLimitRaw?: "base units", currency?: "USDC" }`.
-The float fields are display mirrors; enforcement uses the raw `NUMERIC(39,0)`
-columns (#53). Response: `SpendingAllowance | null`.
+`PUT` body: each limit as base units or as a decimal USDC string.
+
+```json
+{ "dailyLimitRaw": "50000000", "perTraceLimitRaw": "5000000", "currency": "USDC" }
+{ "dailyLimit": "5", "perTraceLimit": "0.5" }
+```
+
+`dailyLimitRaw` wins over `dailyLimit` (likewise `perTraceLimit…`). Decimal
+strings are parsed exactly (at most 7 decimal places, no exponents). JSON
+numbers are still accepted for one release: they are converted with
+`parseUsdc(String(n))` (so `1e-7` is rejected) and the response carries
+`Deprecation: true`. Enforcement uses the raw `NUMERIC(39,0)` columns (#53).
+`perTraceLimit` must be positive and at most `dailyLimit`. Response: the
+allowance DTO above, or `null` from `GET` when none is set. Errors:
+`400 VALIDATION_ERROR`, `400 INVALID_ALLOWANCE`.
 
 #### `POST /traces/access/preauthorize` (auth)
 
@@ -739,7 +785,7 @@ coverage (`EXPIRED`).
 
 #### `GET /traces/payments` (auth)
 
-The user's last 100 `PaymentEvent`s, newest first.
+The user's last 100 payment events as payment event DTOs (#224), newest first.
 
 ### Agent calibration (#68)
 
