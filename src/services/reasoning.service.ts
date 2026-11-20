@@ -51,15 +51,13 @@ export async function generateReasoningTrace(
   // canonicalJson would encode differently from the contracts repo.
   const provenance = buildTraceProvenance([...(opts.upstreamProvenance ?? []), hedgeConditions.provenance]);
 
-  const traceDoc: TraceDocV1 = buildTraceDoc({
-    traceId,
-    agentType: input.agentType,
-    decisionType: input.decisionType,
-    action: input.decisionType.toLowerCase(),
-    backendMarketId: input.marketId,
-    onChainMarketId,
+  const tracePayload: Record<string, unknown> = {
+    agentType:           input.agentType,
+    decisionType:        input.decisionType,
+    marketId:            input.marketId,
+    sourcesUsed:         input.sourcesUsed,
     probabilityEstimate: input.probabilityEstimate,
-    marketProbability: input.marketProbability,
+    marketProbability:   input.marketProbability,
     edge,
     confidenceInterval:  ci,
     betFraction:         input.betFraction,
@@ -82,10 +80,8 @@ export async function generateReasoningTrace(
     signal: s.signal,
   }));
 
-  const trace = await prisma.reasoningTrace.upsert({
-    where: { id: traceId },
-    create: {
-      id: traceId,
+  const trace = await prisma.reasoningTrace.create({
+    data: {
       marketId:            input.marketId,
       agentType:           input.agentType,
       decisionType:        input.decisionType,
@@ -104,11 +100,10 @@ export async function generateReasoningTrace(
       verified:            false,
       isPublic:            false,
     },
-    update: {},
   });
 
   logger.info({ traceId: trace.id, edge, marketId: input.marketId }, 'Reasoning trace generated');
-  return { trace, tracePayload: traceDoc };
+  return { trace, tracePayload: { ...tracePayload, traceId: trace.id } };
 }
 
 /**
