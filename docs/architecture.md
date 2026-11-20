@@ -654,6 +654,25 @@ OpenAI-compatible). They normalise SDK errors into `LlmError.kind`
 
 Text mode never sets a JSON response format; only `mode: "json"` does.
 
+**Structured calls follow the same policy (#218).** `callLLMStructured` walks
+`policies[task]` in order and uses each spec's provider, model, temperature and
+`maxTokens` (the request is capped at `min(opts.maxTokens ?? 2048,
+spec.maxTokens)`, as in the router). Provider health lives in one
+`ProviderHealthBook` (`router.healthBook`) shared by both paths: a provider the
+router has cooling or open is skipped by structured calls, and structured
+transport failures (5xx, timeouts, rate limits, quotas) cool providers for
+free-form calls too. Validation failures fall back to the next spec but never
+touch provider health. With the default policies the request bodies for
+`market_generation`, `hedge_conditions` and `forecasting` are unchanged.
+`dispute_review` structured calls now honour the policy's **Gemini-first**
+order (#92) at temperature 0; before #218 they went to Anthropic first at 0.2.
+If every configured spec is cooling or open, the call fails with `503
+LLM_UNAVAILABLE` saying so.
+
+OpenAI-compatible specs (`provider: "openai"`) are supported on both paths and
+take a lease on the shared guards like the other providers
+(`LLM_OPENAI_RPM`, default 15).
+
 ## Structured LLM output (#65)
 
 Output that must fit a shape (market proposals, hedge conditions) is never
@@ -671,26 +690,53 @@ must contain the probability, expiry must be in the future) are `postValidate`
 functions whose message goes into the repair turn.
 
 `callLLMStructured(spec, { system, user }, { maxTokens, ctx, task })` returns
-`{ value, provider, model, attempts }`:
+`{ value, provider, model, attempts }`. Providers are tried in the task's
+policy order (see "LLM router" above); each is a structured adapter in
+`src/lib/llm/structured/`:
 
 1. **Anthropic**: `tools: [{ name, description, input_schema }]` with a forced
    `tool_choice`; the `tool_use` block is searched for (a text block may come
    first). `stop_reason: "max_tokens"` is never repaired at the same budget: the
-   budget is doubled once, then the call fails with a specific reason.
-2. **Gemini**: `responseMimeType: "application/json"` plus `responseSchema`;
-   the text is `JSON.parse`d with no fence stripping.
-3. Each provider gets **one repair round**: the zod issues (or the `postValidate`
+   budget is doubled once (never past 16 384 or twice the spec's `maxTokens`),
+   then the call fails with a specific reason.
+2. **Gemini**: `responseMimeType: "application/json"` plus `responseSchema`,
+   with the spec's model (not the `GEMINI_MODEL` constant); the text is
+   `JSON.parse`d with no fence stripping.
+3. **OpenAI** (#218): `response_format: { type: "json_schema", json_schema: {
+   name, schema: spec.openaiSchema, strict: true } }`. `toOpenAIStrictSchema`
+   closes every object (`additionalProperties: false`), lists every property in
+   `required` and turns optional ones into `anyOf: [X, { type: "null" }]`; the
+   adapter deletes those nulls again before zod, so `price_asset: null` means
+   "absent". Only a small keyword allowlist reaches OpenAI (`type`,
+   `description`, `properties`, `required`, `additionalProperties`, `items`,
+   `enum`, `anyOf`; `const` becomes a one-value `enum`): bounds such as
+   `minimum`, `maxItems` or `pattern` are dropped because strict-mode support
+   for them varies by model, and zod re-checks them. A schema strict mode
+   cannot express (a free-form map, a non-object root) throws at module load.
+   For servers that reject `response_format`, `jsonMode: "prompt"` sends no
+   response format and appends the JSON Schema to the system prompt instead. A
+   `message.refusal` is a validation failure (`model refused`), and
+   `finish_reason: "length"` raises the budget once like Anthropic.
+4. Each provider gets **one repair round**: the zod issues (or the `postValidate`
    message) go back as an `is_error` `tool_result` (Anthropic) or a correction
-   turn (Gemini). Anthropic that still fails falls back to Gemini.
-4. Failure is `AppError(422, "LLM_STRUCTURED_OUTPUT_FAILED", { provider, issues })`
-   when output never validated, otherwise the last transport/guard error.
+   turn (Gemini, OpenAI). A provider that still fails falls back to the next
+   spec in the policy.
+5. Failure is `AppError(422, "LLM_STRUCTURED_OUTPUT_FAILED", { provider, issues })`
+   when output never validated, otherwise the last transport/guard error,
+   otherwise `503 LLM_UNAVAILABLE` (nothing configured, or everything cooling).
+   Provenance records the evaluated chain in `route: { task, chain: [{ provider,
+   model, decision }] }`, where `decision` is `served`, an error class
+   (`validation`, `server_error`, ...), `unconfigured`, `cooling` or `open`;
+   categories only, never provider messages. `fallbackFrom` is the first chain
+   entry that was attempted and failed.
    `INVALID_LLM_JSON`, `SCHEMA_VALIDATION_FAILED` and
    `INVALID_CONFIDENCE_INTERVAL` remain on the `validateMarketQuestion()` wrapper.
 
 Every attempt, repairs included, takes a lease on the shared guards below. Prompts
 and outputs are not logged at info; counts and provider/model are. `callLLMText`
 falls back to a plain-text Gemini call (never a JSON one). Tests replace the
-providers through `setAnthropicClient()` / `setGeminiModelFactory()` and replay the
+providers through `setAnthropicClient()` / `setGeminiModelFactory()` /
+`setOpenAIClient()` and replay the
 shapes in `tests/fixtures/llm/` (hand-built examples of the API shapes, not
 captures from a live account).
 
@@ -938,7 +984,7 @@ with recorded model outputs; `tests/llm-injection.test.ts` replays them through
 replaces the per-process interval guards and circuit breaker. Every provider
 attempt is `acquire()` → call → `record()`:
 
-- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, capacity =
+- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, `LLM_OPENAI_RPM`, capacity =
   RPM). An empty bucket makes `acquire` wait with jitter for up to 30 s.
 - **Circuit breaker** per provider: `closed → open → half-open`. A daily quota error
   opens it (Gemini: until at least the next UTC midnight); `LLM_BREAKER_FAILURE_THRESHOLD`

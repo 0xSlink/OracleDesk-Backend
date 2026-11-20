@@ -581,6 +581,9 @@ export const envObjectSchema = z
       .pipe(z.number().int().positive()),
     LLM_GEMINI_RPM: z.string().default('15').transform(Number)
       .pipe(z.number().int().positive()),
+    // OpenAI-compatible calls, router and structured (#218).
+    LLM_OPENAI_RPM: z.string().default('15').transform(Number)
+      .pipe(z.number().int().positive()),
     LLM_BREAKER_FAILURE_THRESHOLD: z.string().default('3').transform(Number)
       .pipe(z.number().int().positive()),
     LLM_BREAKER_OPEN_MS: z.string().default('3600000').transform(Number)
