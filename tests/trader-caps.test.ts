@@ -65,7 +65,10 @@ test('market headroom falls back to DB trades + seed and is marked estimated', a
   (prisma.chainEvent.findFirst as any) = async () => { eventQueries++; return null; };
   (prisma.trade.findMany as any) = async ({ where }: any) => {
     assert.deepEqual(where, { marketId: 'm1', status: 'EXECUTED' });
-    return [{ amount: 12.5 }, { amount: 7.25 }];
+    return [
+      { collateralRaw: '125000000', amountRaw: null },
+      { collateralRaw: null, amountRaw: '72500000' },
+    ];
   };
   (prisma.market.findUnique as any) = async () => ({ seedAmountRaw: '500000000' });
   try {
@@ -128,30 +131,35 @@ test('budget read failure skips the cycle and logs TREASURY_READ_FAILED', async 
   assert.equal(env.decisions[0].kind, 'TREASURY_READ_FAILED');
   assert.match(String(env.decisions[0].data.error), /rpc unreachable/);
 
-  // Production writes it to the agent log.
+  // Production writes the durable decision record and retains the agent log.
   const { prisma } = await import('../src/lib/prisma');
   const { prodTraderEnv } = await import('../src/agents/trader-env');
   const logs: any[] = [];
-  const orig = prisma.agentLog.create;
+  const decisions: any[] = [];
+  const orig = { log: prisma.agentLog.create, decision: prisma.agentDecision.upsert };
   (prisma.agentLog.create as any) = async ({ data }: any) => { logs.push(data); return data; };
+  (prisma.agentDecision.upsert as any) = async ({ create }: any) => { decisions.push(create); return create; };
   try {
     await prodTraderEnv().recordDecision(env.decisions[0]);
     assert.equal(logs[0].action, 'TREASURY_READ_FAILED');
     assert.equal(logs[0].agentType, 'TRADER');
+    assert.equal(decisions[0].reasonCode, 'TREASURY_READ_FAILED');
+    assert.match(decisions[0].inputsDigest, /^[a-f0-9]{64}$/);
   } finally {
-    (prisma.agentLog.create as any) = orig;
+    (prisma.agentLog.create as any) = orig.log;
+    (prisma.agentDecision.upsert as any) = orig.decision;
   }
 });
 
 test('bankroll for drawdown and correlation equals available capital', async () => {
   const { params, run } = await policy();
   // A 40 USDC loss is 4% of 1 000 (pause at 3%) but 0.4% of 10 000.
-  const small = fakeTraderEnv({ budget: async () => budget({ availableRaw: 1_000n * USDC }), closedPnl: [-40] });
+  const small = fakeTraderEnv({ budget: async () => budget({ availableRaw: 1_000n * USDC }), closedPnl: [-40n * USDC] });
   await run(small, params);
   assert.equal(small.decisions[0].kind, 'DRAWDOWN_PAUSE');
   assert.equal(small.buys.length, 0);
 
-  const large = fakeTraderEnv({ budget: async () => budget({ availableRaw: 10_000n * USDC }), closedPnl: [-40] });
+  const large = fakeTraderEnv({ budget: async () => budget({ availableRaw: 10_000n * USDC }), closedPnl: [-40n * USDC] });
   await run(large, params);
   assert.ok(!large.decisions.some((d) => d.kind === 'DRAWDOWN_PAUSE'));
   assert.deepEqual(large.correlationBankrolls, [10_000]);

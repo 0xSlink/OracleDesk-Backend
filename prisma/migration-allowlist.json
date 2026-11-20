@@ -108,5 +108,13 @@
     ],
     "reason": "limitPriceBps is bounded to 1..10000 by its CHECK and decisionLedger is a Stellar ledger sequence (u32); both match Prisma Int fields.",
     "approvedBy": "pending maintainer review on the PR that adds this migration"
+  },
+  {
+    "migration": "20261120010000_operational_alerts",
+    "rules": [
+      "ban-drop-not-null"
+    ],
+    "reason": "#226 stores operational-alert deliveries in alert_deliveries, which have no dispute review, so reviewId must become nullable. Every existing row has a reviewId and keeps it, and every existing reader filters by reviewId; nothing that wrote or read the column before relies on NOT NULL.",
+    "approvedBy": "pending maintainer review on the PR that adds this migration"
   }
 ]

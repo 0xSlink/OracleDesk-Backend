@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePermission, requireStepUp } from '../middlewares/auth.middleware';
 import {
+  ackAlert,
   ackDispute,
   addOperationSignature,
   cancelDisputeTx,
@@ -10,11 +11,13 @@ import {
   getAdminRoles,
   getAdmins,
   getAgentControls,
+  getAlerts,
   getReconciliationRun,
   getSpecCompat,
   getChainSigningKeys,
   registerChainSigningKey,
   retireChainSigningKey,
+  silenceAlert,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -65,6 +68,9 @@ router.post('/treasury/operations/:id/submit', requirePermission('treasury.opera
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
 router.post('/treasury/operations/:id/cancel', requirePermission('treasury.operate'), requireStepUp, cancelTreasuryOperation);
 router.get('/agents/controls', requirePermission('agents.manage'), getAgentControls);
+router.get('/agent-decisions', requirePermission('admin.read'), getAgentDecisions);
+router.get('/agent-decisions/cycles', requirePermission('admin.read'), getAgentDecisionCycles);
+router.get('/agent-decisions/cycles/:cycleId', requirePermission('admin.read'), getAgentDecisionCycleFunnel);
 router.post('/agents/:agent/pause', requirePermission('agents.manage'), pauseAgentControl);
 router.post('/agents/:agent/resume', requirePermission('agents.manage'), resumeAgentControl);
 router.get('/status', requirePermission('admin.read'), getSystemStatus);
@@ -89,6 +95,11 @@ router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat)
 router.get('/chain/signing-keys', requirePermission('chain.signing_keys'), requireStepUp, getChainSigningKeys);
 router.post('/chain/signing-keys/register', requirePermission('chain.signing_keys'), requireStepUp, registerChainSigningKey);
 router.post('/chain/signing-keys/:publicKey/retire', requirePermission('chain.signing_keys'), requireStepUp, retireChainSigningKey);
+// Operational alerts (#226). Guarded and audited by requirePermission; there is
+// deliberately no unguarded copy of these in the section below.
+router.get('/alerts', requirePermission('admin.read'), getAlerts);
+router.post('/alerts/:id/ack', requirePermission('alerts.manage'), ackAlert);
+router.post('/alerts/:id/silence', requirePermission('alerts.manage'), silenceAlert);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);

@@ -69,12 +69,14 @@ export function fakeTraderEnv(opts: {
   markets?: MarketView[];
   forecast?: (m: MarketView) => Forecast | null;
   exposureRaw?: bigint;
-  closedPnl?: number[];
+  closedPnl?: bigint[];
   /** Fraction of the proposed size the correlation check keeps. */
   correlationKeep?: number;
   /** Sizing reserves per market (#225); defaults to a deep pool at the market's price. */
   pool?: (m: MarketView) => PoolView | null;
   now?: () => Date;
+  /** Decision price (#266); defaults to a fresh indexed price at the market's currentYesProb. */
+  price?: (m: MarketView) => Promise<DecisionPrice>;
 } = {}): FakeEnv {
   const env: FakeEnv = {
     buys: [],

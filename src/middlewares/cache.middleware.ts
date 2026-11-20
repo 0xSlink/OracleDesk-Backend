@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { sha256Hex, canonicalJson } from '../utils/hash.util';
-import { checkAccess } from '../services/subscription.service';
 
 export type CachePolicy =
   | { kind: 'immutable'; maxAge: number }
@@ -24,9 +23,12 @@ export async function authClass(req: Request): Promise<string> {
     return 'anon';
   }
 
-  const traceId = req.params.id;
+  const traceId = req.params.id === undefined ? undefined : String(req.params.id);
   if (traceId) {
     try {
+      // Loaded lazily: response.util imports this module, and a static import of
+      // subscription.service closes a cycle back through error.middleware.
+      const { checkAccess } = await import('../services/subscription.service');
       const access = await checkAccess(user.userId, traceId);
       if (access.hasAccess) return 'pass';
     } catch {}

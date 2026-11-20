@@ -244,6 +244,15 @@ const STEPS: Partial<Record<GenerationRunState, StepFn>> = {
       return skip('DUPLICATE', { dedup: { reason: reservation.reason, match: reservation.match ?? null } });
     }
 
+    const market = await prisma.$transaction(async (tx) => {
+      const created = await createMarketFromProposal(proposal, undefined, undefined, tx);
+      await tx.marketGenerationRun.update({
+        where: { id: ctx.run.id },
+        data: { marketId: created.id },
+      });
+      return created;
+    });
+
     return {
       outputs: {
         proposal,
@@ -395,7 +404,8 @@ const STEPS: Partial<Record<GenerationRunState, StepFn>> = {
     return {
       outputs: {
         traceId: trace.id,
-        tracePayload: jsonSafe({ ...tracePayload, onChainMarketId: ctx.outputs.onChainMarketId ?? null }),
+        // The validated document, unchanged (#227); publish_trace carries the market id.
+        tracePayload: jsonSafe(tracePayload),
       },
       next: 'TRACE_PERSISTED',
     };

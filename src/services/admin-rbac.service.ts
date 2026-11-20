@@ -44,6 +44,7 @@ const ROLE_PERMISSIONS: Record<AdminRoleName, readonly AdminPermission[]> = {
     'calibration.recompute',
     'refund.request',
     'refund.prepare',
+    'alerts.manage',
   ],
   auditor: [
     'admin.read',

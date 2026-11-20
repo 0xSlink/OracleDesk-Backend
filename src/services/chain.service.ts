@@ -113,6 +113,25 @@ export const Outcomes = {
   No: { tag: 'No', values: undefined } as Outcome,
 };
 
+// ─── Crash injection (test only) ─────────────────────────────────────────────
+// The outbox crash matrix (tests/integration/outbox-recovery.int.test.ts) stops
+// the live write at each named point. A hook that never settles freezes the
+// write there without running any catch/finally, as a real process death
+// would. Inert unless NODE_ENV=test.
+
+export type CrashPoint = 'after-built' | 'after-signed' | 'after-send-accepted' | 'after-send-timeout' | 'after-advance';
+
+let crashHook: ((p: CrashPoint) => Promise<void>) | null = null;
+
+export function setCrashHookForTest(fn: typeof crashHook): void {
+  if (config.NODE_ENV !== 'test') throw new Error('setCrashHookForTest is test only');
+  crashHook = fn;
+}
+
+async function crashPoint(p: CrashPoint): Promise<void> {
+  if (crashHook && config.NODE_ENV === 'test') await crashHook(p);
+}
+
 // ─── Cache Management ───────────────────────────────────────────────────────
 
 let activeChainCache: ChainCache | null = null;
@@ -662,6 +681,7 @@ async function attemptWrite<T>(
           innerFee: inclusionFee.toString(),
           resourceFee: minResourceFee.toString(),
         });
+        await crashPoint('after-built');
 
         // The binding built and simulated against the RPC's account; rewrite the
         // built transaction with the sequence allocated from the cached counter.
@@ -693,6 +713,7 @@ async function attemptWrite<T>(
           sequence: rawTx?.built?.sequence != null ? String(rawTx.built.sequence) : null,
         });
         if (signedRow) outboxRow = signedRow;
+        await crashPoint('after-signed');
 
         const sender = getTransactionSender();
         try {
@@ -709,8 +730,10 @@ async function attemptWrite<T>(
             { signal },
           );
           outboxRow = await acceptSend(store, outboxRow, contract, txHash, sendRes);
+          await crashPoint('after-send-accepted');
           // The network accepted the envelope: reserve the sequence.
           await ctx.advanceSequence();
+          await crashPoint('after-advance');
           return { tx, simulated, txHash, sendRes, maxTime, minTime, minResourceFee };
         } catch (err: any) {
           if (err instanceof SequenceLockLost) {
@@ -722,6 +745,7 @@ async function attemptWrite<T>(
             );
           }
           if (err instanceof TimeoutError || err?.code === 'UPSTREAM_TIMEOUT') {
+            await crashPoint('after-send-timeout');
             // The submission may have been applied: re-read and never rebuild it.
             await ctx.resync().catch(() => undefined);
             throw new ChainWriteFailure(

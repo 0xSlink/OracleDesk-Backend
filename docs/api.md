@@ -939,9 +939,11 @@ the snapshot. The trader's reasoning traces carry the same
 
 Query `status`, `page`, `limit`. Response: `Position[]` with
 `market { question, category, settlementCurrency, expiryTimestamp, onChainMarketId }`,
-`trade { direction, amount, edgeDetected, kellyFraction, txHash }` and `lastExit`
+`trade { direction, amount, amountRaw, collateralRaw, sharesRaw, feeRaw, price,
+priceBps, fillPriceBps, edgeDetected, edgeBps, kellyFraction, txHash }` and `lastExit`
 (the newest `PositionExit`: `status`, `reason`, `mode`, `sharesSoldRaw`,
-`collateralOutRaw`, `effectivePrice`, `txHash`, `error`, `createdAt`, or `null`).
+`collateralOutRaw`, `effectivePrice`, `effectivePriceBps`, `txHash`, `error`,
+`createdAt`, or `null`).
 
 Positions are denominated in **shares** (#77/#78). Raw fields are base-unit
 decimal strings (7-decimal USDC, `NUMERIC(39,0)`), never floats:
@@ -953,12 +955,18 @@ decimal strings (7-decimal USDC, `NUMERIC(39,0)`), never floats:
 | `feesPaidRaw` | Fee paid on the buy (`ceil(collateral_in × fee_bps / 10000)`). |
 | `realisedCollateralRaw`, `realisedPnlRaw` | Collateral received and PnL realised by confirmed exits. |
 | `markPriceBps` | Mid price of the held outcome, in basis points. |
+| `entryPriceBps` | Fill price of the held outcome in basis points. |
 | `markValueRaw` | **Mid value**: `shares × markPriceBps / 10000`. Overstates what a large position can realise. |
 | `liquidationValueRaw` | **Liquidation value**: what selling all shares into the pool returns now (`collateralOutForShares`, fee included, rounded down). `0` with `illiquid: true` if the pool can't absorb the sale. **This drives risk.** |
 | `unrealisedPnlRaw` | `liquidationValueRaw − costBasisRaw`. Stop-loss (−15% of cost) and hedge detection (−10%) use it. |
 | `markedAt`, `valuationSource` | When and from where the mark came: `indexed` (newest indexed `Trade` event), `rpc` (`get_market`) or `estimated` (backfill). |
-| `entryPrice` | Effective price paid per share (`collateralIn / sharesOut`), display only. |
-| `currentPrice`, `pnl`, `size` | Float display fields derived from the raw values (`pnl` = realised + unrealised). |
+| `entryPrice`, `currentPrice`, `pnl`, `size` | Deprecated float compatibility projections; not used for accounting or agent risk decisions. |
+
+Trade and copy-trade responses also expose raw collateral/shares/fees and
+basis-point prices. Their legacy float amount, price, edge, and PnL fields are
+deprecated compatibility projections. They remain during the API deprecation
+window; a later contract migration will remove them after consumers have moved
+to the raw fields.
 
 Several open positions in one market are valued by their own shares; selling
 them together returns less than the sum because each sale moves the pool.
@@ -1097,6 +1105,34 @@ agent or past `until`.
 Body `{ reason?: string }`. Clears only the named row: resuming `TRADER` does not
 clear an `ALL` pause. Every pause, resume and automatic expiry writes an
 `agent_control_events` row (`before`, `after`, `actor`, `source`).
+
+### Operational alerts (admin auth, #226)
+
+#### `GET /admin/alerts?id=&state=&severity=&page=&limit=` (`admin.read`)
+
+Incidents, most recently updated first, with pagination meta. `state` is
+`PENDING | OPEN | RESOLVED`, `severity` `INFO | WARN | CRITICAL`, `id` one
+incident (the `adminUrl` in every notification links here). Each row:
+`{ id, subjectType, subjectKey, severity, state, episode, summary, detail,
+badStreak, goodStreak, openedAt, resolvedAt, ackedAt, ackedBy, silencedUntil,
+lastNotifiedAt, escalations }`. `400 VALIDATION_ERROR` for an unknown filter value.
+
+#### `POST /admin/alerts/:id/ack` (`alerts.manage`, audited)
+
+Acknowledges the current episode and stops its escalation. A later episode
+starts unacknowledged. `409 ALERT_NOT_OPEN` unless the incident is OPEN,
+`404 ALERT_NOT_FOUND`.
+
+#### `POST /admin/alerts/:id/silence` (`alerts.manage`, audited)
+
+Body `{ untilMinutes: 1..1440 }`. No notification (open, escalation or resolve)
+is sent for the incident until then; state transitions continue.
+
+Notification payloads (generic webhook, signed like dispute alerts):
+`{ type: "oracledesk.ops_alert", sentAt, alert: { kind: "ops", level, severity,
+subjectType, subjectKey, summary, detail, state, incidentId, episode,
+notification: "open" | "escalate" | "resolve", adminUrl } }`. Dispute alerts
+keep `type: "oracledesk.dispute_alert"` and their payload unchanged.
 
 #### `GET /admin/reconciliation/runs?limit=` (admin)
 

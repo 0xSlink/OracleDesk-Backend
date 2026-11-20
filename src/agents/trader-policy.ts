@@ -131,6 +131,9 @@ export async function runTraderPolicy(
   opts: { signal?: AbortSignal } = {},
 ): Promise<void> {
   const { signal } = opts;
+  const cycleId = correlation().cycleId ?? newId('cyc');
+  const recordDecision = (decision: Omit<DecisionRecord, 'cycleId'>) =>
+    env.recordDecision({ ...decision, cycleId });
   signal?.throwIfAborted();
 
   // Step 0: The treasury is the source of truth for capital and caps (#76).
@@ -140,7 +143,11 @@ export async function runTraderPolicy(
     budget = await env.budget();
   } catch (err) {
     logger.warn({ err: (err as Error)?.message }, 'Trader Agent: treasury budget read failed — skipping cycle');
-    await env.recordDecision({ kind: 'TREASURY_READ_FAILED', data: { error: String((err as Error)?.message ?? err).slice(0, 300) } });
+    await recordDecision({
+      kind: 'TREASURY_READ_FAILED',
+      reasonCode: 'TREASURY_READ_FAILED',
+      data: { error: String((err as Error)?.message ?? err).slice(0, 300) },
+    });
     return;
   }
   const cycle: CycleBudget = { current: budget };
@@ -149,11 +156,17 @@ export async function runTraderPolicy(
   // Step 1: Check daily drawdown limit against the live bankroll
   const now = env.clock.now();
   const closedToday = await env.closedPnlSince(env.clock.startOfDay());
-  const drawdown = evaluateDailyDrawdown(closedToday, bankroll, now);
+  const drawdown = evaluateDailyDrawdown(closedToday, budget.availableRaw, now);
   if (drawdown.isPaused) {
-    await env.recordDecision({
+    await recordDecision({
       kind: 'DRAWDOWN_PAUSE',
-      data: { drawdownPct: drawdown.drawdownPct, dailyLoss: drawdown.dailyLoss, pauseUntil: drawdown.pauseUntil?.toISOString() },
+      reasonCode: 'DRAWDOWN_LIMIT',
+      data: {
+        drawdownPct: drawdown.drawdownPct,
+        dailyLoss: drawdown.dailyLoss,
+        dailyLossRaw: drawdown.dailyLossRaw.toString(),
+        pauseUntil: drawdown.pauseUntil?.toISOString(),
+      },
     });
     logger.warn({ drawdownPct: drawdown.drawdownPct }, 'Trader Agent: paused due to drawdown limit');
     return;
@@ -171,8 +184,11 @@ export async function runTraderPolicy(
     const { shouldClose, reason } = await env.stopLoss(position);
     if (shouldClose && reason) {
       const exit = await env.exit(position.id, 'STOP_LOSS', position.currentPrice ?? position.entryPrice);
-      await env.recordDecision({
+      await recordDecision({
         kind: 'STOP_LOSS', marketId: position.marketId,
+        reasonCode: 'STOP_LOSS_TRIGGERED',
+        positionId: position.id,
+        outcome: { exited: exit.ok, ...(exit.reason ? { exitReason: exit.reason } : {}) },
         data: { positionId: position.id, reason, exited: exit.ok, ...(exit.reason ? { exitReason: exit.reason } : {}) },
       });
       logger.info({ positionId: position.id, reason, exited: exit.ok }, 'Stop-loss triggered');
@@ -187,10 +203,24 @@ export async function runTraderPolicy(
     signal?.throwIfAborted();
     try {
       await env.hedge(rec);
-      await env.recordDecision({ kind: 'HEDGE', marketId: rec.hedgeMarketId, data: { ...rec } });
     } catch (err) {
       logger.warn({ err, rec }, 'Trader Agent: hedge failed');
+      await recordDecision({
+        kind: 'HEDGE',
+        reasonCode: 'HEDGE_FAILED',
+        marketId: rec.hedgeMarketId,
+        data: { ...rec, error: String(err).slice(0, 300) },
+        outcome: { status: 'FAILED' },
+      });
+      continue;
     }
+    await recordDecision({
+      kind: 'HEDGE',
+      reasonCode: 'HEDGE_EXECUTED',
+      marketId: rec.hedgeMarketId,
+      data: { ...rec },
+      outcome: { status: 'EXECUTED' },
+    });
   }
 
   signal?.throwIfAborted();
@@ -206,12 +236,13 @@ export async function runTraderPolicy(
   let consecutiveStale = 0;
   for (const market of activeMarkets) {
     signal?.throwIfAborted();
-    const stale = await analyzeAndTradeMarket(env, params, cycle, market, signals, signal);
+    const stale = await analyzeAndTradeMarket(env, params, cycle, market, signals, recordDecision, signal);
     if (stale) {
       consecutiveStale++;
       if (consecutiveStale >= config.TRADER_STALE_ABORT_COUNT) {
-        await env.recordDecision({
+        await recordDecision({
           kind: 'SKIP',
+          reasonCode: 'PRICE_SOURCE_DOWN',
           data: { reason: 'PRICE_SOURCE_DOWN', consecutiveStale },
         });
         logger.warn({ consecutiveStale }, 'Trader Agent: price source down — aborting market scan');
@@ -232,15 +263,29 @@ async function analyzeAndTradeMarket(
   cycle: CycleBudget,
   market: MarketView,
   signals: AggregatedSignals,
+  recordDecision: (decision: Omit<DecisionRecord, 'cycleId'>) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<boolean> {
   try {
     // Skip if we already have an open position in this market
-    if (await env.hasOpenPosition(market.id)) return false;
+    if (await env.hasOpenPosition(market.id)) {
+      await recordDecision({
+        kind: 'SKIP',
+        reasonCode: 'POSITION_ALREADY_OPEN',
+        marketId: market.id,
+        data: { reason: 'POSITION_ALREADY_OPEN' },
+      });
+      return false;
+    }
 
     // Guard: skip markets without an on-chain id — price() cannot serve them (#266).
     if (!market.onChainMarketId) {
-      await env.recordDecision({ kind: 'SKIP', marketId: market.id, data: { reason: 'NOT_ON_CHAIN' } });
+      await recordDecision({
+        kind: 'SKIP',
+        reasonCode: 'MARKET_NOT_ON_CHAIN',
+        marketId: market.id,
+        data: { reason: 'NOT_ON_CHAIN' },
+      });
       return false;
     }
 
@@ -250,8 +295,9 @@ async function analyzeAndTradeMarket(
       decisionPriceResult = await env.price(market);
     } catch (err) {
       if (err instanceof StalePriceError) {
-        await env.recordDecision({
+        await recordDecision({
           kind: 'SKIP', marketId: market.id,
+          reasonCode: 'PRICE_STALE',
           data: { reason: 'PRICE_STALE', detail: (err as StalePriceError).details },
         });
         return true; // signal stale to circuit breaker
@@ -268,14 +314,32 @@ async function analyzeAndTradeMarket(
     };
 
     const forecast = await env.forecast(market, signals);
-    if (!forecast) return false;
+    if (!forecast) {
+      await recordDecision({
+        kind: 'SKIP',
+        reasonCode: 'FORECAST_UNAVAILABLE',
+        marketId: market.id,
+        data: { reason: 'FORECAST_UNAVAILABLE', signalCount: signals.signalCount },
+      });
+      return false;
+    }
+    const forecastRef = sha256Hex(canonicalJson(forecast));
     const { p: agentProb, ci: confidenceInterval } = forecast;
 
     // Compute edge
     const edge = agentProb - marketProb;
 
     // Guard: insufficient edge
-    if (Math.abs(edge) < params.minEdge) return false;
+    if (Math.abs(edge) < params.minEdge) {
+      await recordDecision({
+        kind: 'SKIP',
+        reasonCode: 'EDGE_BELOW_MIN',
+        marketId: market.id,
+        forecastRef,
+        data: { edge, minEdge: params.minEdge, p: forecast.p, marketProb },
+      });
+      return false;
+    }
 
     // Size from the conservative end of the CI. Everything is from the side
     // being bought: a NO bet compares P(NO) = 1 − ci.upper with the NO price
@@ -289,8 +353,10 @@ async function analyzeAndTradeMarket(
       // does not: intended, the forecast is too uncertain to size (#75). The
       // gate calculateKellySize applied, kept as is when sizing moved to the curve (#225).
       logger.debug({ marketId: market.id, edge, conservativeProb, sidePrice }, 'SIZE_ZERO_WIDE_CI: interval too wide to size');
-      await env.recordDecision({
+      await recordDecision({
         kind: 'SKIP', marketId: market.id,
+        reasonCode: 'SIZE_ZERO_WIDE_CI',
+        forecastRef,
         data: { reason: 'SIZE_ZERO_WIDE_CI', direction, edge, p: agentProb, ci: confidenceInterval },
       });
       return false;
@@ -388,7 +454,14 @@ async function analyzeAndTradeMarket(
     }
     if (sized.collateralRaw < MIN_TRADE_RAW || !correlation) {
       logger.debug({ marketId: market.id, binding, finalRaw: sizing.finalRaw }, 'Position size below minimum after caps — skipping');
-      await env.recordDecision({ kind: 'SKIP', marketId: market.id, data: { reason: 'SIZE_BELOW_MIN', direction, edge, sizing } });
+      await recordDecision({
+        kind: 'SKIP',
+        reasonCode: 'SIZE_BELOW_MIN',
+        marketId: market.id,
+        forecastRef,
+        sizingRecord: sizing as unknown as Record<string, unknown>,
+        data: { reason: 'SIZE_BELOW_MIN', direction, edge, sizing },
+      });
       return false;
     }
 
@@ -417,7 +490,14 @@ async function analyzeAndTradeMarket(
     if (result.ok) cycle.current = spend(cycle.current, amountRaw);
     await env.recordDecision({
       kind: result.ok ? 'BUY' : 'SKIP',
+      reasonCode: result.ok ? 'BUY_ACCEPTED' : 'BUY_REJECTED',
       marketId: market.id,
+      traceId: result.traceId,
+      tradeId: result.tradeId,
+      positionId: result.positionId,
+      forecastRef,
+      sizingRecord: sizing as unknown as Record<string, unknown>,
+      outcome: result.outcome ?? { accepted: result.ok, ...(result.reason ? { reason: result.reason } : {}) },
       data: { direction, amount, amountRaw: sizing.finalRaw, binding, edge, ...(result.reason ? { reason: result.reason } : {}) },
     });
 
@@ -425,6 +505,13 @@ async function analyzeAndTradeMarket(
     return false;
   } catch (err) {
     logger.warn({ err, marketId: market.id }, 'Trader Agent: market analysis failed');
+    await recordDecision({
+      kind: 'SKIP',
+      reasonCode: 'MARKET_ANALYSIS_FAILED',
+      marketId: market.id,
+      data: { error: String(err).slice(0, 300) },
+      outcome: { status: 'FAILED' },
+    });
     return false;
   }
 }

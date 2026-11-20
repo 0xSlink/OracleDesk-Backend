@@ -173,8 +173,8 @@ export interface TradePayload {
   kellyFraction: number;
   edgeDetected: number;
   traceId?: string;
-  /** Trace document to pin and publish once the trade is on-chain. */
-  tracePayload?: Record<string, unknown>;
+  /** Trace document to pin and publish once the trade is on-chain (#227). */
+  tracePayload?: import('../schemas/trace').TraceDocV2;
   /** Average-price limit and deadline from the decision (#245). */
   bounds?: import('../services/trade-bounds').TradeBounds;
   /** Conservative probability of the side bought; a re-quote at or above it cancels the order (#225). */
@@ -289,6 +289,7 @@ export interface HedgeRecommendation {
   hedgeMarketId: string;
   hedgeDirection: TradeDirection;
   hedgeSize: number;
+  hedgeSizeRaw: bigint;
   rationale: string;
 }
 
