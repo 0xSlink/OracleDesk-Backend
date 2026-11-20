@@ -5,6 +5,7 @@ import { AppError } from '../middlewares/error.middleware';
 import { AgentPausedError } from './agent-controls.service';
 import type { KellyResult, TradePayload, KellyInput } from '../types';
 import { agentBuy, getOnChainMarket, Outcomes, quoteBuy, ExpiredError } from './chain.service';
+import { boundsColumns, buyWithinLimit, deadlinePassed } from './trade-bounds';
 import { ChainPendingError, TransactionError } from './stellar/errors';
 
 /** Collateral in base units: amountRaw when the trader sized in base units (#76), else the display amount. */
@@ -32,6 +33,14 @@ const MAX_CORRELATED_EXPOSURE  = 0.05;   // 5% total correlated exposure
 const MIN_EDGE_THRESHOLD       = 0.08;   // 8 percentage points minimum edge
 const MIN_LIQUIDITY_USD        = 500;    // $500 minimum market liquidity
 const AGENT_SLIPPAGE_BPS       = 100n;   // min_shares_out = quote − 1%
+
+/** A bounded order (#245) whose limit or deadline can no longer be met: skipped, never sent. */
+export class TradeBoundError extends AppError {
+  constructor(code: 'LIMIT_PRICE_UNREACHABLE' | 'TRADE_DEADLINE_PASSED', message: string, details: Record<string, unknown>) {
+    super(409, code, message, details);
+    this.name = 'TradeBoundError';
+  }
+}
 
 export { calculateKellySize } from './kelly';
 
@@ -172,6 +181,7 @@ export async function executeTrade(payload: TradePayload): Promise<{
       price:         payload.price,
       edgeDetected:  payload.edgeDetected,
       kellyFraction: payload.kellyFraction,
+      ...boundsColumns(payload.bounds),
     },
   });
 
@@ -212,6 +222,17 @@ export async function executeTrade(payload: TradePayload): Promise<{
           data:  { status: 'CANCELLED', errorMessage: `${err.code}: ${err.message}` },
         });
         await logAgentAction('TRADER', 'INFO', 'TRADE_SKIPPED_PAUSED', payload.marketId, { tradeId: trade.id });
+        throw err;
+      }
+
+      // #245: the decision's limit price or deadline can no longer be met. Nothing
+      // was sent; the trader re-decides on the next cycle with a fresh quote.
+      if (err instanceof TradeBoundError) {
+        await prisma.trade.update({
+          where: { id: trade.id },
+          data:  { status: 'CANCELLED', errorMessage: `${err.code}: ${err.message}` },
+        });
+        await logAgentAction('TRADER', 'WARN', err.code, payload.marketId, { tradeId: trade.id, ...(err.details as object) });
         throw err;
       }
 
@@ -465,6 +486,23 @@ async function submitTradeTransaction(
   const result = await agentBuy(
     async () => {
       const quoted = await quoteBuy(market.onChainMarketId!, outcome, collateralIn);
+      // #245: re-checked on every attempt, so a rebuild or retry never executes past
+      // the decision's deadline or above the price at which the edge is gone.
+      const bounds = payload.bounds;
+      if (bounds) {
+        if (deadlinePassed(bounds.deadline, Date.now() / 1000)) {
+          throw new TradeBoundError('TRADE_DEADLINE_PASSED', 'Decision deadline passed before submission', {
+            deadline: bounds.deadline.toString(),
+          });
+        }
+        if (!buyWithinLimit(collateralIn, quoted, bounds.limitPriceBps)) {
+          throw new TradeBoundError('LIMIT_PRICE_UNREACHABLE', 'Quoted average price is above the decision limit', {
+            limitPriceBps: bounds.limitPriceBps,
+            collateralIn: collateralIn.toString(),
+            quotedShares: quoted.toString(),
+          });
+        }
+      }
       const minSharesOut = (quoted * (10_000n - AGENT_SLIPPAGE_BPS)) / 10_000n;
       return {
         market_id: market.onChainMarketId!,

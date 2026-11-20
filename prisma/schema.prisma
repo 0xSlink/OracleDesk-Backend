@@ -4,7 +4,8 @@
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -153,6 +154,8 @@ enum TraceAuditStatus {
   NOT_ON_CHAIN
   FOREIGN_AGENT
   ARCHIVED
+  SIGNATURE_INVALID
+  UNSIGNED
 }
 
 enum AgentType {
@@ -397,6 +400,11 @@ model Trade {
   innerTxHash  String?
   builderFee   Float          @default(0)
   errorMessage String?
+  /// Execution bounds (#245). CHECK: trades_limit_price_bps_range (limitPriceBps IS NULL OR between 1 and 10000)
+  limitPriceBps  Int?
+  /// Ledger close time (unix seconds) after which the trade must not execute.
+  deadline       BigInt?
+  decisionLedger Int?
   executedAt   DateTime?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
@@ -479,6 +487,10 @@ model PositionExit {
   /// SUBMITTED | CONFIRMED | FAILED | SIMULATED
   status           String
   error            String?
+  /// Execution bounds (#245). CHECK: position_exits_limit_price_bps_range (limitPriceBps IS NULL OR between 1 and 10000)
+  limitPriceBps    Int?
+  deadline         BigInt?
+  decisionLedger   Int?
   createdAt        DateTime @default(now())
 
   position Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
@@ -533,6 +545,9 @@ model ReasoningTrace {
   sourcesUsed         Json              // Array<{ source, weight, signal }>
   /// CHECK: reasoning_traces_prob_est_range (probabilityEstimate >= 0 AND probabilityEstimate <= 1)
   probabilityEstimate Float
+  /// The forecaster's probability before recalibration (#244); calibration fits read this.
+  /// CHECK: reasoning_traces_raw_prob_est_range (rawProbabilityEstimate IS NULL OR between 0 and 1)
+  rawProbabilityEstimate Float?
   /// CHECK: reasoning_traces_market_prob_range (marketProbability >= 0 AND marketProbability <= 1)
   marketProbability   Float
   edge                Float
@@ -545,6 +560,7 @@ model ReasoningTrace {
   provenance          Json?
   agentWallet         String?
   signature           String?
+  signingKey          String?           @db.Char(64)
   ipfsCid             String?
   /// CHECK: reasoning_traces_trace_hash_format (traceHash IS NULL OR 64 hex chars)
   /// sha256 (hex) of the exact bytes pinned to IPFS.
@@ -1598,6 +1614,63 @@ model AlertDelivery {
   @@map("alert_deliveries")
 }
 
+/// Per-wallet open position for a prediction market outcome (#155).
+/// PK matches wallet_positions_pkey from 20261017100002_wallet_pnl.
+model WalletPosition {
+  wallet          String
+  onChainMarketId BigInt
+  outcome         String
+  shares          Decimal  @default(0) @db.Decimal(39, 0)
+  costBasis       Decimal  @default(0) @db.Decimal(39, 0)
+  realizedPnl     Decimal  @default(0) @db.Decimal(39, 0)
+  boughtCollateral Decimal @default(0) @db.Decimal(39, 0)
+  soldCollateral  Decimal  @default(0) @db.Decimal(39, 0)
+  feesPaid        Decimal  @default(0) @db.Decimal(39, 0)
+  redeemed        Decimal  @default(0) @db.Decimal(39, 0)
+  tradeCount      Int      @default(0)
+  lastEventId     String   @default("")
+  settled         Boolean  @default(false)
+  incomplete      Boolean  @default(false)
+  /// Plain column default — NOT @updatedAt; the service writes this explicitly.
+  updatedAt       DateTime @default(now()) @db.Timestamp(3)
+
+  @@id([wallet, onChainMarketId, outcome], map: "wallet_positions_pkey")
+  @@index([onChainMarketId], map: "wallet_positions_onChainMarketId_idx")
+  @@map("wallet_positions")
+}
+
+/// Daily aggregate stats per wallet and category (#155).
+model WalletStatsDaily {
+  wallet      String
+  day         DateTime @db.Date
+  category    String
+  volume      Decimal  @default(0) @db.Decimal(39, 0)
+  realizedPnl Decimal  @default(0) @db.Decimal(39, 0)
+  fees        Decimal  @default(0) @db.Decimal(39, 0)
+  trades      Int      @default(0)
+  wins        Int      @default(0)
+  losses      Int      @default(0)
+
+  @@id([wallet, day, category], map: "wallet_stats_daily_pkey")
+  @@index([day], map: "wallet_stats_daily_day_idx")
+  @@map("wallet_stats_daily")
+}
+
+/// Deduplication log — one row per trade event already applied (#155).
+model WalletEventApplied {
+  eventId   String   @id(map: "wallet_events_applied_pkey")
+  appliedAt DateTime @default(now()) @db.Timestamp(3)
+
+  @@map("wallet_events_applied")
+}
+
+/// Markets flagged for PnL recalculation (#155).
+model WalletPnlDirtyMarket {
+  onChainMarketId BigInt   @id(map: "wallet_pnl_dirty_markets_pkey")
+  dirtiedAt       DateTime @default(now()) @db.Timestamp(3)
+  reason          String?
+
+  @@map("wallet_pnl_dirty_markets")
 /// Short-lived exclusive hold on a question that prevents concurrent cycles
 /// from creating duplicate markets. Rows are HELD until the market is inserted
 /// (then COMMITTED), or released on skip/abort/failure.
@@ -1667,4 +1740,110 @@ model PremiumUsageDaily {
   @@unique([userId, date])
   @@index([userId])
   @@map("premium_usage_daily")
+}
+
+/// Market generation saga state (#152, #242). TRACE_PINNED / TRACE_PUBLISHED
+/// are legacy: the saga maps them to TRACE_ENQUEUED on resume.
+enum GenerationRunState {
+  STARTED
+  SIGNALS_READY
+  PROPOSED
+  MARKET_PERSISTED
+  QUESTION_PINNED
+  CHAIN_SUBMITTED
+  CHAIN_CONFIRMED
+  TRACE_PERSISTED
+  TRACE_PINNED
+  TRACE_PUBLISHED
+  COMPLETED
+  SKIPPED
+  NEEDS_ATTENTION
+  CANCELLED
+  GATED
+  VALIDATED
+  SEED_PLANNED
+  TRACE_ENQUEUED
+}
+
+/// One market-generation saga run (#242). Every step persists its outputs
+/// before the next side effect; `fence` increments on every claim so a worker
+/// whose lease expired can no longer write step results.
+model MarketGenerationRun {
+  id            String             @id @default(uuid())
+  trigger       String
+  state         GenerationRunState @default(STARTED)
+  attempts      Int                @default(0)
+  nextAttemptAt DateTime?
+  lockedBy      String?
+  lockedUntil   DateTime?
+  fence         Int                @default(0)
+  cycleId       String?
+  inputs        Json?
+  outputs       Json               @default("{}")
+  marketId      String?            @unique
+  market        Market?            @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  lastError     Json?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @default(now()) @updatedAt
+
+  @@index([state, nextAttemptAt])
+  @@map("market_generation_runs")
+}
+
+/// Fitted per-category recalibration maps (#244). One active row per
+/// (agentType, category); superseded versions stay for audit. `id` is the
+/// map's content hash, so a refit from the same inputs reproduces it.
+model RecalibrationMapRow {
+  id         String   @id
+  agentType  String
+  category   String
+  version    Int
+  params     Json
+  fittedFrom Json
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([agentType, category, version])
+  @@index([agentType, category, active])
+  @@map("recalibration_maps")
+}
+
+/// Per-signer single-use SEP-7 signing request (#270). Raw callback tokens are
+/// never persisted — only their SHA-256 hex digest (`tokenHash`).
+model Sep7Request {
+  id          String    @id @default(uuid())
+  operationId String
+  signer      String
+  tokenHash   String    @unique
+  status      String    @default("ISSUED")
+  uri         String
+  expiresAt   DateTime
+  usedAt      DateTime?
+  rejectCode  String?
+  createdAt   DateTime  @default(now())
+
+  @@unique([operationId, signer])
+  @@map("sep7_requests")
+}
+
+enum IpfsPinState {
+  PENDING
+  PINNING
+  PINNED
+  MISSING
+  FAILED
+}
+
+/// Per-CID, per-provider replication state for anchored IPFS documents (#271).
+model IpfsPin {
+  cid           String
+  provider      String
+  state         IpfsPinState @default(PENDING)
+  attempts      Int          @default(0)
+  lastError     String?
+  lastCheckedAt DateTime?
+  pinnedAt      DateTime?
+
+  @@id([cid, provider])
+  @@map("ipfs_pins")
 }

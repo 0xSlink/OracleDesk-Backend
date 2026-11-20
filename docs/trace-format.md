@@ -135,3 +135,19 @@ JSON Schema URL: `https://api.oracledesk.io/api/v1/schemas/question/v2.json`
   "backendMarketId": "22222222-2222-2222-2222-222222222222"
 }
 ```
+
+## Recalibration fields (#244)
+
+For TRADER traces, the `forecast` block (the ensemble) may carry:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `forecast.raw.p` | number | Ensemble probability before recalibration |
+| `forecast.raw.ci` | `{ lower, upper }` | Ensemble 90% interval before recalibration |
+| `forecast.calibration` | object \| null | `{ mapId, version, category, applied }` of the map behind `probabilityEstimate`; `applied: false` when recalibration is disabled |
+
+`probabilityEstimate` and `confidenceInterval` are the values the trade was
+sized on (after recalibration when applied). The database also stores
+`rawProbabilityEstimate` per trace; it is not part of the pinned document.
+Readers must treat all three fields as optional: traces written before #244
+do not have them.

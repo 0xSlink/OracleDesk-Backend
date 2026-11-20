@@ -8,6 +8,7 @@ import { postgresContentStore } from '../services/content-store.service';
 import { correlation, newId, runWithContext } from '../lib/context';
 import { purgeExpiredIdempotencyKeys } from '../middlewares/idempotency.middleware';
 import { computeAndStoreSnapshots } from '../services/calibration.service';
+import { fitAndStoreMaps } from '../services/recalibration.service';
 import { purgeSignalStore } from '../services/signal-store.service';
 import { expireReservations } from '../services/market-reservation.service';
 import { recordCronRun } from './registry';
@@ -93,12 +94,26 @@ export function startMonitorCron(): void {
     }
   }));
 
+  // IPFS pin replication and repair (#271) — hourly under a Postgres advisory lock.
+  cron.schedule('25 * * * *', () => tick('ipfs-replication', async () => {
+    const startedAt = new Date();
+    try {
+      await runIpfsReplicationJob();
+      recordCronRun('ipfs-replication', 'success', startedAt, new Date());
+    } catch (err) {
+      recordCronRun('ipfs-replication', 'failure', startedAt, new Date(), err);
+      logger.error({ err }, 'Monitor cron: IPFS replication job failed');
+    }
+  }));
+
   // Calibration snapshots (#68) — daily at 03:10. The computation takes a
   // Postgres advisory lock, so with several instances only one does the work.
   cron.schedule('10 3 * * *', () => tick('calibration', async () => {
     const startedAt = new Date();
     try {
       await computeAndStoreSnapshots();
+      // #244: refit per-category recalibration maps from the same resolved data.
+      await fitAndStoreMaps().catch((err) => logger.warn({ err }, 'Monitor cron: recalibration refit failed'));
       recordCronRun('calibration', 'success', startedAt, new Date());
     } catch (err) {
       recordCronRun('calibration', 'failure', startedAt, new Date(), err);

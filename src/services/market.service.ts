@@ -361,6 +361,9 @@ export async function createMarketFromProposal(
   tx?: Prisma.TransactionClient,
 ): Promise<Market> {
   const finalCategory = normalizeCategory(proposal.category);
+  // Callers that persist the market together with other rows (the saga run,
+  // the dedup reservation) pass their transaction client.
+  const client = tx ?? prisma;
 
   const market = await (tx ?? prisma).market.create({
     data: {

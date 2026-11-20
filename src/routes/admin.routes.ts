@@ -15,6 +15,9 @@ import {
   getAgentDecisionCycleFunnel,
   getReconciliationRun,
   getSpecCompat,
+  getChainSigningKeys,
+  registerChainSigningKey,
+  retireChainSigningKey,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -24,6 +27,8 @@ import {
   getTraceAuditSummary,
   getTreasury,
   getTreasuryOperation,
+  getOperationSep7Status,
+  issueOperationSep7,
   getDisputes,
   listReconciliationRuns,
   listTreasuryOperations,
@@ -52,6 +57,8 @@ router.get('/treasury', requirePermission('treasury.read'), getTreasury);
 router.get('/treasury/operations', requirePermission('treasury.read'), listTreasuryOperations);
 router.post('/treasury/operations', requirePermission('treasury.operate'), requireStepUp, createOperation);
 router.get('/treasury/operations/:id', requirePermission('treasury.read'), getTreasuryOperation);
+router.get('/treasury/operations/:id/sep7', requirePermission('treasury.read'), getOperationSep7Status);
+router.post('/treasury/operations/:id/sep7', requirePermission('treasury.operate'), requireStepUp, issueOperationSep7);
 router.post('/treasury/operations/:id/signatures', requirePermission('treasury.operate'), requireStepUp, addOperationSignature);
 router.post('/treasury/operations/:id/submit', requirePermission('treasury.operate'), requireStepUp, submitTreasuryOperation);
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
@@ -75,6 +82,10 @@ router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), 
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
 // Spec compatibility report from the boot gate (#34): read-only diagnostics.
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
+// Agent trace signing keys (#273): permission- and step-up-guarded only.
+router.get('/chain/signing-keys', requirePermission('chain.signing_keys'), requireStepUp, getChainSigningKeys);
+router.post('/chain/signing-keys/register', requirePermission('chain.signing_keys'), requireStepUp, registerChainSigningKey);
+router.post('/chain/signing-keys/:publicKey/retire', requirePermission('chain.signing_keys'), requireStepUp, retireChainSigningKey);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);
@@ -104,5 +115,19 @@ import { idempotent } from '../middlewares/idempotency.middleware';
 router.get('/risk/portfolio', requirePermission('admin.read'), getRiskPortfolio);
 router.get('/risk/portfolio/history', requirePermission('admin.read'), getRiskPortfolioHistory);
 router.post('/risk/portfolio/run', requirePermission('agents.manage'), idempotent(), runRiskPortfolio);
+
+// Market generation saga runs (#242)
+import {
+  cancelGenerationRun,
+  getGenerationRun,
+  listGenerationRuns,
+  retryGenerationRun,
+  startGenerationRun,
+} from '../controllers/generation-runs.controller';
+router.get('/generation-runs', requirePermission('markets.generate'), listGenerationRuns);
+router.get('/generation-runs/:id', requirePermission('markets.generate'), getGenerationRun);
+router.post('/generation-runs', requirePermission('markets.generate'), requireStepUp, startGenerationRun);
+router.post('/generation-runs/:id/cancel', requirePermission('markets.generate'), requireStepUp, cancelGenerationRun);
+router.post('/generation-runs/:id/retry', requirePermission('markets.generate'), requireStepUp, retryGenerationRun);
 
 export default router;

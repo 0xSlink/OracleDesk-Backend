@@ -278,7 +278,7 @@ async function write<T>(
     return result;
   } catch (err) {
     // A refused write never reached the chain; it is not a chain failure.
-    if (!(err instanceof AgentPausedError)) {
+    if (!(err instanceof AgentPausedError) && (err as { name?: string } | null)?.name !== 'TradeBoundError') {
       await recordChainWriteOutcome(scope, false, err instanceof ChainError ? err.contractError : null);
     }
     throw err;
@@ -321,6 +321,9 @@ async function submitWrite<T>(
     try {
       tx = await call({ fee: inclusionFee, timeoutInSeconds }, signer);
     } catch (err) {
+      // A bounded trade's local limit/deadline check (#245) refused to build:
+      // nothing was sent, and the caller needs the original decision code.
+      if ((err as { name?: string } | null)?.name === 'TradeBoundError') throw err;
       throw new ChainError(`${method} could not be built`, contractErrorName(contract, err), {
         method,
         cause: err instanceof Error ? err.message : String(err),
@@ -566,6 +569,7 @@ async function liveWriteWithRetry<T>(
       return await attemptWrite<T>(scope, seenVersion, opClass, contract, method, args, call, signal, ref);
     } catch (err) {
       if (err instanceof AgentPausedError) throw err;
+      if ((err as { name?: string } | null)?.name === 'TradeBoundError') throw err;
       // Expiry has its own recovery (#42) and a pending submission belongs to
       // the outbox worker (#35): neither is retried blindly here.
       if (err instanceof ExpiredError) throw err;

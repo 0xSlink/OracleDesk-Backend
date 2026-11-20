@@ -267,6 +267,7 @@ export function prodTraderEnv(): TraderEnv {
         decisionType:        'OPEN_POSITION',
         sourcesUsed:         order.forecast.sources,
         probabilityEstimate: order.forecast.p,
+        rawProbabilityEstimate: order.forecast.ensemble?.raw?.p ?? order.forecast.p,
         marketProbability:   order.marketProb,
         edge:                order.edge,
         confidenceInterval:  order.forecast.ci,

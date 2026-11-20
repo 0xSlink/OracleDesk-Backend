@@ -132,6 +132,10 @@ export interface EnsembleForecast {
   members: Array<ModelForecast & { weight: number }>;
   /** sha256 of the ForecastInput (the cache key's input half). */
   inputsDigest: string;
+  /** The ensemble before recalibration (#244). Absent on forecasts cached before #244. */
+  raw?: { p: number; ci: ConfidenceInterval };
+  /** The recalibration map behind p and ci; applied=false when CALIBRATION_SHRINKAGE_ENABLED is off. */
+  calibration?: { mapId: string; version: number; category: string; applied: boolean } | null;
 }
 
 export interface Forecaster {
@@ -163,6 +167,8 @@ export interface TradePayload {
   traceId?: string;
   /** Trace document to pin and publish once the trade is on-chain. */
   tracePayload?: Record<string, unknown>;
+  /** Average-price limit and deadline from the decision (#245). */
+  bounds?: import('../services/trade-bounds').TradeBounds;
 }
 
 export interface CopyTradePayload {
@@ -187,6 +193,8 @@ export interface TraceInput {
   decisionType: string;
   sourcesUsed: WeightedSignal[];
   probabilityEstimate: number;
+  /** The forecaster's probability before recalibration (#244). Defaults to probabilityEstimate. */
+  rawProbabilityEstimate?: number;
   marketProbability: number;
   edge: number;
   confidenceInterval: ConfidenceInterval;
