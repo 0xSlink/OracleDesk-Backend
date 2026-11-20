@@ -127,6 +127,23 @@ enum GenerationJobStatus {
   FAILED
 }
 
+enum GenerationRunState {
+  STARTED
+  SIGNALS_READY
+  PROPOSED
+  MARKET_PERSISTED
+  QUESTION_PINNED
+  CHAIN_SUBMITTED
+  CHAIN_CONFIRMED
+  TRACE_PERSISTED
+  TRACE_PINNED
+  TRACE_PUBLISHED
+  COMPLETED
+  SKIPPED
+  NEEDS_ATTENTION
+  CANCELLED
+}
+
 enum TraceAuditStatus {
   VERIFIED
   HASH_MISMATCH
@@ -144,6 +161,45 @@ enum TraceAuditStatus {
 enum AgentType {
   MARKET_MAKER
   TRADER
+}
+
+enum AgentDecisionKind {
+  BUY
+  SKIP
+  HEDGE
+  STOP_LOSS
+  DRAWDOWN_PAUSE
+  TREASURY_READ_FAILED
+  MARKET_SKIP
+  MARKET_CREATED
+}
+
+enum AgentDecisionReason {
+  TREASURY_READ_FAILED
+  DRAWDOWN_LIMIT
+  STOP_LOSS_TRIGGERED
+  HEDGE_EXECUTED
+  HEDGE_FAILED
+  POSITION_ALREADY_OPEN
+  MARKET_NOT_ON_CHAIN
+  PRICE_STALE
+  FORECAST_UNAVAILABLE
+  EDGE_BELOW_MIN
+  SIZE_ZERO_WIDE_CI
+  SIZE_BELOW_MIN
+  BUY_ACCEPTED
+  BUY_REJECTED
+  PRICE_SOURCE_DOWN
+  MARKET_ANALYSIS_FAILED
+  AGENT_PAUSED
+  NO_SIGNALS
+  LLM_BUDGET_EXCEEDED
+  MARKET_GENERATION_FAILED
+  PROPOSAL_UNRESOLVABLE
+  DUPLICATE_PROPOSAL
+  SEED_POLICY_SKIP
+  MARKET_CREATED
+  CYCLE_FAILED
 }
 
 enum LogLevel {
@@ -266,6 +322,7 @@ model Market {
   hedgePositions Position[]          @relation("MarketHedgePositions")
   reasoningTraces ReasoningTrace[]
   copyTrades     CopyTrade[]
+  agentDecisions AgentDecision[]
   agentLogs      AgentLog[]
   creationAttempt MarketCreationAttempt?
 
@@ -295,6 +352,27 @@ model MarketGenerationJob {
   @@map("market_generation_jobs")
 }
 
+model MarketGenerationRun {
+  id            String            @id @default(uuid())
+  trigger       String
+  state         GenerationRunState @default(STARTED)
+  attempts      Int               @default(0)
+  nextAttemptAt DateTime?
+  lockedBy      String?
+  lockedUntil   DateTime?
+  inputs        Json?
+  outputs       Json              @default("{}")
+  marketId      String?           @unique
+  lastError     Json?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  market Market? @relation(fields: [marketId], references: [id], onDelete: SetNull)
+
+  @@index([state, nextAttemptAt])
+  @@map("market_generation_runs")
+}
+
 /// Individual trade executed by the Trader Agent
 model Trade {
   id           String         @id @default(uuid())
@@ -303,6 +381,16 @@ model Trade {
   status       TradeStatus    @default(PENDING)
   /// CHECK: trades_amount_nonneg (amount >= 0)
   amount       Float
+  /// Exact requested collateral in 7-decimal USDC base units.
+  amountRaw    Decimal?       @db.Decimal(39, 0)
+  /// Chain-confirmed collateral, shares, and fee for the executed buy.
+  collateralRaw Decimal?      @db.Decimal(39, 0)
+  sharesRaw    Decimal?       @db.Decimal(39, 0)
+  feeRaw       Decimal?       @db.Decimal(39, 0)
+  /// Decision price and edge in basis points; fill price comes from chain evidence.
+  priceBps     Int?
+  fillPriceBps Int?
+  edgeBps      Int?
   price        Float
   edgeDetected Float
   kellyFraction Float
@@ -324,6 +412,7 @@ model Trade {
   market     Market      @relation(fields: [marketId], references: [id], onDelete: Cascade)
   position   Position?
   copyTrades CopyTrade[]
+  agentDecisions AgentDecision[]
 
   @@index([marketId])
   @@index([status])
@@ -346,6 +435,8 @@ model Position {
   pnl          Float          @default(0)
   /// Outcome shares held, from agent_buy's result (i128 base units, #77/#78). Null: legacy row.
   sharesRaw    Decimal?       @db.Decimal(39, 0)
+  /// Entry price of the held outcome in basis points.
+  entryPriceBps Int?
   /// Collateral paid for the shares still held (base units). Reduced pro rata by partial exits.
   costBasisRaw Decimal?       @db.Decimal(39, 0)
   feesPaidRaw  Decimal?       @db.Decimal(39, 0)
@@ -372,6 +463,7 @@ model Position {
   hedgeMarket Market? @relation("MarketHedgePositions", fields: [hedgeMarketId], references: [id], onDelete: SetNull)
   trade       Trade   @relation(fields: [tradeId], references: [id], onDelete: Cascade)
   exits       PositionExit[]
+  agentDecisions AgentDecision[]
 
   @@index([marketId])
   @@index([status])
@@ -389,6 +481,7 @@ model PositionExit {
   maxSharesInRaw   Decimal  @db.Decimal(39, 0)
   /// collateralOut / sharesSold, for display.
   effectivePrice   Float?
+  effectivePriceBps Int?
   txHash           String?
   reason           String
   /// SUBMITTED | CONFIRMED | FAILED | SIMULATED
@@ -490,6 +583,7 @@ model ReasoningTrace {
 
   market        Market         @relation(fields: [marketId], references: [id], onDelete: Cascade)
   copyTrades    CopyTrade[]
+  agentDecisions AgentDecision[]
   subscriptions Subscription[]
   paymentEvents PaymentEvent[]
   audits        TraceAudit[]
@@ -526,6 +620,7 @@ model CalibrationSnapshot {
 model CopyTrade {
   id                   String          @id @default(uuid())
   userId               String
+  followerWallet       String
   traceId              String
   marketId             String
   tradeId              String?
@@ -534,6 +629,7 @@ model CopyTrade {
   amount               Float
   /// CHECK: copy_trades_amount_raw_digits (amountRaw IS NULL OR digits only)
   amountRaw            String?
+  priceBps             Int?
   /// CHECK: copy_trades_tx_hash_format (txHash IS NULL OR 64 hex chars)
   txHash               String?         @unique
   builderFee           Float           @default(0)
@@ -555,12 +651,75 @@ model CopyTrade {
   trace  ReasoningTrace @relation(fields: [traceId], references: [id], onDelete: Restrict)
   market Market         @relation(fields: [marketId], references: [id], onDelete: Restrict)
   trade  Trade?         @relation(fields: [tradeId], references: [id])
+  audits CopyTradeAudit[]
 
   @@index([userId])
+  @@index([followerWallet, status])
   @@index([traceId])
   @@index([status])
   @@index([status, expiresAt])
   @@map("copy_trades")
+}
+
+/// Audit trail for a copy intent fulfilled after its normal expiry window.
+model CopyTradeAudit {
+  id           String          @id @default(uuid())
+  copyTradeId  String
+  fromStatus   CopyTradeStatus
+  toStatus     CopyTradeStatus
+  txHash       String
+  chainEventId String
+  reason       String
+  createdAt    DateTime        @default(now())
+
+  copyTrade CopyTrade @relation(fields: [copyTradeId], references: [id], onDelete: Cascade)
+
+  @@index([copyTradeId, createdAt])
+  @@map("copy_trade_audits")
+}
+
+/// Durable report for buy events that fit multiple indistinguishable intents.
+model CopyTradeAmbiguity {
+  id                    String   @id @default(uuid())
+  chainEventId          String   @unique
+  txHash                String
+  candidateCopyTradeIds Json
+  reason                String
+  createdAt             DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("copy_trade_ambiguities")
+}
+
+/// One typed decision record from a trader or market-maker cycle.
+model AgentDecision {
+  id            String              @id @default(uuid())
+  decisionKey   String              @unique
+  cycleId       String
+  agentType     AgentType
+  kind          AgentDecisionKind
+  reasonCode    AgentDecisionReason
+  marketId      String?
+  traceId       String?
+  tradeId       String?
+  positionId    String?
+  forecastRef   String?
+  inputsDigest  String
+  inputs        Json
+  sizingRecord  Json?
+  outcome       Json?
+  createdAt     DateTime            @default(now())
+
+  market   Market?         @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  trace    ReasoningTrace? @relation(fields: [traceId], references: [id], onDelete: SetNull)
+  trade    Trade?          @relation(fields: [tradeId], references: [id], onDelete: SetNull)
+  position Position?       @relation(fields: [positionId], references: [id], onDelete: SetNull)
+
+  @@index([cycleId, agentType, createdAt])
+  @@index([cycleId, marketId])
+  @@index([marketId, createdAt])
+  @@index([reasonCode, createdAt])
+  @@map("agent_decisions")
 }
 
 /// Nanopayment subscription for trace access
@@ -1548,6 +1707,8 @@ model PortfolioRiskSnapshot {
 
   @@index([computedAt])
   @@map("portfolio_risk_snapshots")
+}
+
 /// Tracks premium session devices per user to enforce the concurrent-device cap (#288).
 model PremiumDevice {
   id           String   @id @default(uuid())

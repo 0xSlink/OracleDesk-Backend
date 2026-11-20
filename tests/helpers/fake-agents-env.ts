@@ -160,7 +160,7 @@ export class FakeDb {
 }
 
 const MODELS = [
-  'agentControl', 'agentControlEvent', 'agentLog', 'market', 'reasoningTrace', 'tracePublication', 'position',
+  'agentControl', 'agentControlEvent', 'agentDecision', 'agentLog', 'market', 'reasoningTrace', 'tracePublication', 'position',
   'positionExit', 'trade', 'ipfsContent', 'chainEvent', 'correlationSnapshot', 'signalCache',
 ];
 

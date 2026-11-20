@@ -38,25 +38,63 @@ export const RULES: Record<string, TableRule> = {
   trade: {
     output: 'trades',
     columns: {
-      id: 'keep', marketId: 'keep', direction: 'keep', status: 'keep', amount: 'keep', price: 'keep',
-      edgeDetected: 'keep', kellyFraction: 'keep', txHash: 'hash', builderFee: 'keep', errorMessage: 'keep',
-      executedAt: 'keep', createdAt: 'keep', updatedAt: 'keep',
+      id: 'keep', marketId: 'keep', direction: 'keep', status: 'keep', amount: 'keep', amountRaw: 'keep',
+      collateralRaw: 'keep', sharesRaw: 'keep', feeRaw: 'keep', price: 'keep', priceBps: 'keep',
+      fillPriceBps: 'keep',
+      edgeDetected: 'keep', edgeBps: 'keep', kellyFraction: 'keep', txHash: 'hash', innerTxHash: 'hash',
+      builderFee: 'keep', errorMessage: 'keep', executedAt: 'keep', createdAt: 'keep', updatedAt: 'keep',
     },
   },
   position: {
     output: 'positions',
     columns: {
       id: 'keep', marketId: 'keep', tradeId: 'keep', direction: 'keep', status: 'keep', entryPrice: 'keep',
-      currentPrice: 'keep', size: 'keep', pnl: 'keep', hedgeMarketId: 'keep', closedAt: 'keep',
+      entryPriceBps: 'keep', currentPrice: 'keep', size: 'keep', pnl: 'keep', sharesRaw: 'keep',
+      costBasisRaw: 'keep', feesPaidRaw: 'keep', realisedCollateralRaw: 'keep', realisedPnlRaw: 'keep',
+      markPriceBps: 'keep', markValueRaw: 'keep', liquidationValueRaw: 'keep', unrealisedPnlRaw: 'keep',
+      markedAt: 'keep', valuationSource: 'keep', illiquid: 'keep', hedgeMarketId: 'keep', closedAt: 'keep',
       closeReason: 'keep', createdAt: 'keep', updatedAt: 'keep',
+    },
+  },
+  positionExit: {
+    output: 'position_exits',
+    columns: {
+      id: 'keep', positionId: 'keep', mode: 'keep', sharesSoldRaw: 'keep', collateralOutRaw: 'keep',
+      maxSharesInRaw: 'keep', effectivePrice: 'keep', effectivePriceBps: 'keep', txHash: 'hash',
+      reason: 'keep', status: 'keep', error: 'drop', createdAt: 'keep',
     },
   },
   copyTrade: {
     output: 'copy_trades',
     columns: {
-      id: 'keep', userId: 'keep', traceId: 'keep', marketId: 'keep', tradeId: 'keep', direction: 'keep',
-      amount: 'keep', amountRaw: 'keep', txHash: 'hash', builderFee: 'keep', status: 'keep', pnl: 'keep',
-      createdAt: 'keep', updatedAt: 'keep',
+      id: 'keep', userId: 'keep', followerWallet: 'wallet', traceId: 'keep', marketId: 'keep',
+      tradeId: 'keep', direction: 'keep', amount: 'keep', amountRaw: 'keep', priceBps: 'keep',
+      txHash: 'hash', builderFee: 'keep', status: 'keep', pnl: 'keep', collateralRaw: 'keep',
+      sharesRaw: 'keep', feeRaw: 'keep', ledger: 'keep', chainEventId: 'keep', confirmedAt: 'keep',
+      failureCode: 'keep', verificationAttempts: 'keep', expiresAt: 'keep', createdAt: 'keep', updatedAt: 'keep',
+    },
+  },
+  copyTradeAudit: {
+    output: 'copy_trade_audits',
+    columns: {
+      id: 'keep', copyTradeId: 'keep', fromStatus: 'keep', toStatus: 'keep', txHash: 'hash',
+      chainEventId: 'keep', reason: 'keep', createdAt: 'keep',
+    },
+  },
+  copyTradeAmbiguity: {
+    output: 'copy_trade_ambiguities',
+    columns: {
+      id: 'keep', chainEventId: 'keep', txHash: 'hash', candidateCopyTradeIds: 'keep',
+      reason: 'keep', createdAt: 'keep',
+    },
+  },
+  agentDecision: {
+    output: 'agent_decisions',
+    columns: {
+      id: 'keep', decisionKey: 'hash', cycleId: 'keep', agentType: 'keep', kind: 'keep',
+      reasonCode: 'keep', marketId: 'keep', traceId: 'keep', tradeId: 'keep', positionId: 'keep',
+      forecastRef: 'hash', inputsDigest: 'hash', inputs: 'address-map', sizingRecord: 'address-map',
+      outcome: 'address-map', createdAt: 'keep',
     },
   },
   subscription: {

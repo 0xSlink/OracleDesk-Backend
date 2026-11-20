@@ -892,9 +892,11 @@ the snapshot. The trader's reasoning traces carry the same
 
 Query `status`, `page`, `limit`. Response: `Position[]` with
 `market { question, category, settlementCurrency, expiryTimestamp, onChainMarketId }`,
-`trade { direction, amount, edgeDetected, kellyFraction, txHash }` and `lastExit`
+`trade { direction, amount, amountRaw, collateralRaw, sharesRaw, feeRaw, price,
+priceBps, fillPriceBps, edgeDetected, edgeBps, kellyFraction, txHash }` and `lastExit`
 (the newest `PositionExit`: `status`, `reason`, `mode`, `sharesSoldRaw`,
-`collateralOutRaw`, `effectivePrice`, `txHash`, `error`, `createdAt`, or `null`).
+`collateralOutRaw`, `effectivePrice`, `effectivePriceBps`, `txHash`, `error`,
+`createdAt`, or `null`).
 
 Positions are denominated in **shares** (#77/#78). Raw fields are base-unit
 decimal strings (7-decimal USDC, `NUMERIC(39,0)`), never floats:
@@ -906,12 +908,18 @@ decimal strings (7-decimal USDC, `NUMERIC(39,0)`), never floats:
 | `feesPaidRaw` | Fee paid on the buy (`ceil(collateral_in × fee_bps / 10000)`). |
 | `realisedCollateralRaw`, `realisedPnlRaw` | Collateral received and PnL realised by confirmed exits. |
 | `markPriceBps` | Mid price of the held outcome, in basis points. |
+| `entryPriceBps` | Fill price of the held outcome in basis points. |
 | `markValueRaw` | **Mid value**: `shares × markPriceBps / 10000`. Overstates what a large position can realise. |
 | `liquidationValueRaw` | **Liquidation value**: what selling all shares into the pool returns now (`collateralOutForShares`, fee included, rounded down). `0` with `illiquid: true` if the pool can't absorb the sale. **This drives risk.** |
 | `unrealisedPnlRaw` | `liquidationValueRaw − costBasisRaw`. Stop-loss (−15% of cost) and hedge detection (−10%) use it. |
 | `markedAt`, `valuationSource` | When and from where the mark came: `indexed` (newest indexed `Trade` event), `rpc` (`get_market`) or `estimated` (backfill). |
-| `entryPrice` | Effective price paid per share (`collateralIn / sharesOut`), display only. |
-| `currentPrice`, `pnl`, `size` | Float display fields derived from the raw values (`pnl` = realised + unrealised). |
+| `entryPrice`, `currentPrice`, `pnl`, `size` | Deprecated float compatibility projections; not used for accounting or agent risk decisions. |
+
+Trade and copy-trade responses also expose raw collateral/shares/fees and
+basis-point prices. Their legacy float amount, price, edge, and PnL fields are
+deprecated compatibility projections. They remain during the API deprecation
+window; a later contract migration will remove them after consumers have moved
+to the raw fields.
 
 Several open positions in one market are valued by their own shares; selling
 them together returns less than the sum because each sale moves the pool.
@@ -1050,6 +1058,19 @@ agent or past `until`.
 Body `{ reason?: string }`. Clears only the named row: resuming `TRADER` does not
 clear an `ALL` pause. Every pause, resume and automatic expiry writes an
 `agent_control_events` row (`before`, `after`, `actor`, `source`).
+
+#### Agent decision records (admin)
+
+`GET /admin/agent-decisions` supports `cycleId`, `marketId`, `agentType`,
+`kind`, and `reasonCode` filters with `page`/`limit` pagination. Each decision
+includes its typed kind/reason, input digest and inputs, optional sizing and
+forecast references, outcome, and links to the market, trace, trade, or
+position that resulted.
+
+`GET /admin/agent-decisions/cycles` returns paginated cycle summaries with
+decision counts by agent and first/last timestamps.
+`GET /admin/agent-decisions/cycles/:cycleId` returns a per-cycle funnel grouped
+by agent, kind, and reason, including linked trace/trade counts and markets.
 
 #### `GET /admin/reconciliation/runs?limit=` (admin)
 

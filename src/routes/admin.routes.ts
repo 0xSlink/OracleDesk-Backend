@@ -10,6 +10,9 @@ import {
   getAdminRoles,
   getAdmins,
   getAgentControls,
+  getAgentDecisions,
+  getAgentDecisionCycles,
+  getAgentDecisionCycleFunnel,
   getReconciliationRun,
   getSpecCompat,
   getChainSigningKeys,
@@ -61,6 +64,9 @@ router.post('/treasury/operations/:id/submit', requirePermission('treasury.opera
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
 router.post('/treasury/operations/:id/cancel', requirePermission('treasury.operate'), requireStepUp, cancelTreasuryOperation);
 router.get('/agents/controls', requirePermission('agents.manage'), getAgentControls);
+router.get('/agent-decisions', requirePermission('admin.read'), getAgentDecisions);
+router.get('/agent-decisions/cycles', requirePermission('admin.read'), getAgentDecisionCycles);
+router.get('/agent-decisions/cycles/:cycleId', requirePermission('admin.read'), getAgentDecisionCycleFunnel);
 router.post('/agents/:agent/pause', requirePermission('agents.manage'), pauseAgentControl);
 router.post('/agents/:agent/resume', requirePermission('agents.manage'), resumeAgentControl);
 router.get('/status', requirePermission('admin.read'), getSystemStatus);

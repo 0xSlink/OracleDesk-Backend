@@ -277,6 +277,7 @@ export interface HedgeRecommendation {
   hedgeMarketId: string;
   hedgeDirection: TradeDirection;
   hedgeSize: number;
+  hedgeSizeRaw: bigint;
   rationale: string;
 }
 
