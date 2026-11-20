@@ -223,3 +223,27 @@ sized on (after recalibration when applied). The database also stores
 `rawProbabilityEstimate` per trace; it is not part of the pinned document.
 Readers must treat all three fields as optional: traces written before #244
 do not have them.
+
+## Impact-aware sizing fields (#225)
+
+TRADER traces size orders against the market's FPMM curve. The `sizing`
+block carries an `impact` object describing the fill at `sizing.finalRaw`,
+priced for the side bought. Every value is a string or an integer, so the
+block is canonical-safe:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `sizing.impact.model` | string | `impact` (sized on the curve) or `mid` (closed-form Kelly at the mid, backtest comparison) |
+| `sizing.impact.midBps` | integer | Price of the side bought before the trade |
+| `sizing.impact.avgPriceBps` | integer | `collateral × 10 000 / shares`, fee included |
+| `sizing.impact.postPriceBps` | integer | Price of the side bought after the trade |
+| `sizing.impact.impactBps` | integer | Curve impact only: `(collateral − fee) × 10 000 / shares − midBps` |
+| `sizing.impact.feeRaw` | string | Fee in collateral base units (the market's own `fee_bps`, rounded up) |
+| `sizing.impact.expectedSharesRaw` | string | Shares out from `calcBuy` at the sized collateral |
+| `sizing.impact.effectiveEdge` | string | Conservative probability minus average price, 6 decimals |
+| `sizing.impact.poolLedger` | integer | Ledger the reserves are valid at |
+| `sizing.impact.poolSource` | string | `indexed`, `rpc` or `sim` (backtest) |
+
+`sizing.binding` may now also be `IMPACT`: the curve's optimum, below every
+cap, set the size. `sizing.kellyRaw` is that optimum within the caps, before
+correlation. Traces written before #225 have no `impact` block.

@@ -580,9 +580,8 @@ model ReasoningTrace {
   previewSources      Json?             // First 2 sources (free preview)
   lastAuditStatus     TraceAuditStatus?
   lastAuditedAt       DateTime?
-  /// Confidential storage (#154): ENCRYPTED traces pin an envelope, not plaintext.
-  contentMode         TraceContentMode  @default(PLAINTEXT_LEGACY)
-  plaintextHash       String?           @db.VarChar(64)
+  /// Source weight set version the evidence was scored with (#223); null = before #223 (v0).
+  sourceWeightSetVersion Int?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -754,7 +753,13 @@ model Subscription {
   type       SubscriptionType
   status     SubscriptionStatus @default(ACTIVE)
   /// CHECK: subscriptions_amount_paid_nonneg (amountPaid >= 0)
-  amountPaid Float
+  /// Display mirror only; DEFAULT 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  /// Dropped by the pending contract migration (prisma/migrations-pending).
+  amountPaid Float              @default(0)
+  /// Exact amount paid in USDC base units (#224). NULL only on legacy rows
+  /// until scripts/backfill-payment-raw.ts fills them.
+  /// CHECK: subscriptions_amount_paid_raw_nonneg (NOT VALID until contract)
+  amountPaidRaw Decimal?        @db.Decimal(39, 0)
   currency   SettlementCurrency @default(USDC)
   /// CHECK: subscriptions_tx_hash_format (txHash IS NULL OR 64 hex chars)
   txHash     String?            @unique
@@ -1014,7 +1019,8 @@ model PaymentEvent {
   /// CHECK: payment_events_tx_hash_format (64 hex chars)
   txHash        String             @unique
   type          PaymentEventType
-  amount        Float
+  /// Display mirror only; DEFAULT 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  amount        Float              @default(0)
   /// CHECK: payment_events_amount_raw_digits (amountRaw IS NULL OR digits only)
   amountRaw     String?
   fromAddress   String?
@@ -1047,9 +1053,10 @@ model SpendingAllowance {
   id            String             @id @default(uuid())
   userId        String             @unique
   /// CHECK: spending_allowances_daily_limit_nonneg (dailyLimit >= 0)
-  dailyLimit    Float
+  /// Float mirrors below default to 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  dailyLimit    Float              @default(0)
   /// CHECK: spending_allowances_per_trace_limit_nonneg (perTraceLimit >= 0)
-  perTraceLimit Float
+  perTraceLimit Float              @default(0)
   /// CHECK: spending_allowances_spent_today_nonneg (spentToday >= 0)
   spentToday    Float              @default(0)
   /// Exact base-unit accounting (#53). The Float columns above are display
@@ -1072,6 +1079,27 @@ model SpendingAllowance {
 
   @@index([userId])
   @@map("spending_allowances")
+}
+
+/// Per-row outcome of scripts/backfill-payment-raw.ts (#224). Keyed by the
+/// source table and row id, so reruns overwrite instead of duplicating.
+/// status: VERIFIED | FLOAT_ONLY | MISMATCH | NOT_FOUND (CHECK constraint).
+model PaymentRawBackfill {
+  table      String
+  rowId      String
+  /// Where rawValue came from: CHAIN, FLOAT, PAYMENT_EVENT or BACKFILL.
+  source     String
+  floatValue Float?
+  rawValue   Decimal?  @db.Decimal(39, 0)
+  chainValue Decimal?  @db.Decimal(39, 0)
+  status     String
+  detail     String?
+  /// Whether rawValue was written to the source row.
+  applied    Boolean   @default(false)
+  checkedAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@id([table, rowId])
+  @@map("payment_raw_backfill")
 }
 
 // ─────────────────────────── PRICING SCHEDULE ───────────────────────────
@@ -1937,4 +1965,73 @@ model IpfsPin {
 
   @@id([cid, provider])
   @@map("ipfs_pins")
+}
+
+/// Learned signal source/publisher weights (#223). DRAFT → APPROVED → ACTIVE →
+/// RETIRED; at most one ACTIVE row (raw-SQL partial unique index
+/// source_weight_sets_active_key). Written by `npm run weights:estimate -- --save`.
+model SourceWeightSet {
+  id          String    @id @default(uuid())
+  version     Int       @unique
+  /// DRAFT | APPROVED | ACTIVE | RETIRED
+  status      String    @default("DRAFT")
+  /// { "source:NEWSAPI": 0.64, "publisher:reuters.com": 0.81 }
+  weights     Json
+  /// { key: { lower, upper, nEff, nMarkets, insufficient, ... } }
+  intervals   Json
+  /// { priorSd, window, cutoff, inputDigest, heldOutDeltaLogLoss, regression, ... }
+  method      Json
+  parentId    String?
+  createdBy   String
+  approvedBy  String?
+  activatedAt DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@map("source_weight_sets")
+}
+
+/// One money-audit run (#222): invariants over trades, positions, exits and
+/// outbox rows, read from one REPEATABLE READ snapshot taken at snapshotAt.
+model MoneyAuditRun {
+  id             String    @id @default(uuid())
+  startedAt      DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt     DateTime? @db.Timestamptz(3)
+  snapshotAt     DateTime  @db.Timestamptz(3)
+  /// Highest ledger a chain read of this run observed.
+  observedLedger Int?
+  checked        Int       @default(0)
+  findings       Int       @default(0)
+  repaired       Int       @default(0)
+  rpcCalls       Int       @default(0)
+  error          String?
+
+  @@map("money_audit_runs")
+}
+
+/// One invariant violation seen by a money-audit run (#222).
+model MoneyAuditFinding {
+  id              String    @id @default(uuid())
+  runId           String
+  /// e.g. TRADE_EXECUTED_WITHOUT_OUTBOX
+  invariant       String
+  /// CRITICAL | HIGH | MEDIUM | INFO
+  severity        String
+  /// trade | position | exit | outbox | market_side | trace
+  subjectType     String
+  subjectId       String
+  evidence        Json
+  suggestedRepair String?
+  /// REPORTED | REPAIRED | SKIPPED_IN_FLIGHT | DEFERRED | ACKED
+  action          String
+  /// sha256(invariant|subjectId|evidence-core): carries a finding across runs.
+  fingerprint     String
+  firstSeenRunId  String
+  ackedBy         String?
+  ackedAt         DateTime? @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([runId])
+  @@index([invariant, createdAt])
+  @@index([fingerprint])
+  @@map("money_audit_findings")
 }

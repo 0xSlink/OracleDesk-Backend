@@ -319,7 +319,7 @@ relevanceScore = sourceWeight × recencyDecay × log2(1 + clusterSize)
 recencyDecay   = 0.5 ^ (ageHours / 12)
 ```
 
-`sourceWeight` is `SOURCE_WEIGHTS` (NEWSAPI 0.7, GDELT 0.6, FRED 0.9). Age is measured from `publishedAt`, except for FRED, whose observation date is the start of the reporting period: it ages from `lastSeenAt`. Syndication raises a story's score only logarithmically.
+`sourceWeight` is the active learned weight set when one is active (publisher weight, then source weight, then 0.5; see "Learned source weights (#223)"), otherwise `SOURCE_WEIGHTS` (NEWSAPI 0.7, GDELT 0.6, FRED 0.9). Age is measured from `publishedAt`, except for FRED, whose observation date is the start of the reporting period: it ages from `lastSeenAt`. Syndication raises a story's score only logarithmically.
 
 **Traces.** `sourcesUsed` entries carry `signalId`, `url`, `publisher` and `publishedAt` (built by `evidenceFromSignals`), and their `weight` is the relevance score instead of a constant. The market maker records the signals its proposal cited in `grounding_signal_ids`. The free `previewSources` keep only `{source, publisher, signal}`. Traces written before #73 have no `signalId`; readers treat these fields as optional, and pinned payloads are never rewritten.
 
@@ -412,6 +412,19 @@ A daily pass is granted only after `payment-verification.service.ts` reads the t
 - the amount is at least `DAILY_PASS_PRICE_RAW`.
 
 Each hash is usable once (unique `PaymentEvent.txHash`). There is no development bypass; tests inject a fake RPC reader. Per-trace unlocks are sold by the x402 service in the contracts repo, which the frontend calls directly.
+
+## Money representation (#224)
+
+Payment and allowance money is an integer count of USDC base units (7 decimals), stored as `NUMERIC(39,0)` (or digits-only `TEXT` for `payment_events.amountRaw`) and handled as `bigint` via `src/lib/amounts.ts`: `parseUsdc` (decimal string → base units, rejects exponents and an 8th decimal), `formatUsdc` (base units → display string), `decimalToBigint` (Prisma `Decimal` → `bigint` without a JS number). The exact columns are the only source of truth: `subscriptions.amountPaidRaw`, `payment_events.amountRaw`, `spending_allowances.dailyLimitRaw` / `perTraceLimitRaw` / `spentTodayRaw` / `overageRaw`.
+
+- **Responses.** `toSubscriptionDto`, `toPaymentEventDto` and `toAllowanceDto` in `subscription.service.ts` list their fields explicitly and return each amount as a base-unit string plus a `formatUsdc` display string; a Prisma row is never sent as is, so a Float (or a `Decimal`) cannot leak. Express serialises any `bigint` as a decimal string.
+- **Input.** `PUT /traces/access/allowance` takes base-unit strings or decimal strings; JSON numbers are converted with `parseUsdc(String(n))` for one deprecated release. `usdcFromNumber` is only for legacy float sources and is never trusted on its own: the raw backfill uses it as a candidate compared against the chain.
+- **Float mirrors.** `subscriptions.amountPaid`, `payment_events.amount` and `spending_allowances.dailyLimit` / `perTraceLimit` / `spentToday` are leftovers of #55 being written alongside the exact columns. Nothing reads them. They are removed in three phases so that instances of adjacent releases stay correct during a rolling deploy:
+  1. **Expand** (`20261120020000_payments_raw_expand`): adds `amountPaidRaw` (NOT VALID non-negative CHECK), gives every float `DEFAULT 0`, creates `payment_raw_backfill`. Settlement dual-writes `amountPaidRaw`; `npm run backfill:payment-raw` fills legacy NULLs, verifying each against the on-chain SAC transfer where RPC still has it.
+  2. **Switch** (same release, `PAYMENT_FLOAT_WRITES`): readers, DTOs, snapshots, audits and seeds use raw values only. With `PAYMENT_FLOAT_WRITES=false` writers omit the floats and the defaults apply; an older instance only ever sees `0` in a column it does not read.
+  3. **Contract** (`prisma/migrations-pending/20261120030000_payments_float_contract`): drops the floats and validates the CHECK. It is breaking by design and ships later under `migration:breaking`.
+
+The procedure, preconditions and rollback are in `docs/runbooks/payments-float-contract.md`. Trading and market tables (`Trade`, `Position`, `CopyTrade`, `Market`) still carry floats and are out of scope here.
 
 ## Position valuation (#78)
 
@@ -587,6 +600,32 @@ periods. Bursts of pauses (several scopes at once) coalesce into one.
 
 Resolution-class findings are deferred while the indexer cursor trails the observation by more than `RECONCILE_INDEXER_LAG_LEDGERS` (the indexer may be about to process the event); after three deferrals in a row they are repaired and flagged `forced`. RPC errors other than `MarketNotFound` are not drift: they are counted and the market is retried first next run. The reference ledger's close time comes from `getLedgers`; if that fails the newest indexed event's time (or the wall clock) stands in. Runs and findings persist in `reconcile_runs` / `market_drift_reports` and are readable through the admin endpoints in [api.md](api.md).
 
+## Money audit (#222)
+
+`services/money-audit/` audits the agent's money records — `Trade`, `Position`, `PositionExit` and `ChainTransaction` rows — against each other and against the treasury's on-chain shares. It is distinct from the market lifecycle reconciler above (#83) and from treasury event reconciliation (#18). `cron/money-audit.cron.ts` runs it hourly at minute 27 (`MONEY_AUDIT_ENABLED`); `runMoneyAudit` takes the `money-audit` advisory lock and opens a `REPEATABLE READ` transaction, so every invariant query sees one snapshot (`snapshotAt` is the transaction time). Chain reads happen after the snapshot, through the reconciler's `pool()`, bounded by `MONEY_AUDIT_MAX_RPC_CALLS` (a candidate left unread is re-checked next run).
+
+| Invariant | Severity | Check | Chain read | Repair |
+| --- | --- | --- | --- | --- |
+| `TRADE_EXECUTED_WITHOUT_OUTBOX` | HIGH | `EXECUTED` trade with `txHash` and no `trade.buy` `SUCCESS` row (matched by `refId`, inner hash, landed hash or bump hash) | `getTransaction(txHash)` only when no row exists | — |
+| `POSITION_WITHOUT_EXECUTED_TRADE` | CRITICAL | position whose trade is not `EXECUTED` | — | — |
+| `EXECUTED_TRADE_WITHOUT_POSITION` | HIGH | `EXECUTED` trade with no position (live mode only) | — | `applyBuySuccess` from the `SUCCESS` row |
+| `OUTBOX_TERMINAL_UNHANDLED` | HIGH | domain-kind row in `SUCCESS`/`FAILED`/`EXPIRED`, `handledAt` null, older than the grace | — | `runCompletionHandler` |
+| `TRADE_STUCK_PENDING` | MEDIUM | `PENDING` trade older than `MONEY_AUDIT_PENDING_GRACE_MS` with no non-terminal outbox row | — | — |
+| `EXIT_CONFIRMED_NOT_LANDED` | CRITICAL | `CONFIRMED` live exit with `txHash` and no `trade.sell` `SUCCESS` row | `getTransaction(txHash)`; a landed sale clears it | — |
+| `SHARES_MISMATCH` | CRITICAL (chain < DB) / HIGH (chain > DB) | Σ `sharesRaw` per (on-chain market, side) vs `get_position(market, treasury)` | `getPositionWithLedger` | — |
+| `SHARES_UNKNOWN_LEGACY` | INFO | a side has a pre-#78 position with `sharesRaw` null: not compared | — | — |
+| `TRACE_WITHOUT_TRADE` | MEDIUM | `CONFIRMED` `buy_yes`/`buy_no` publication whose market has no `EXECUTED` trade on that side created before the publication | — | — |
+
+**Expected shares.** Shares leave the treasury only through a confirmed `agent_sell`, which lowers the position's `sharesRaw` to what is left. Closes that sell nothing — `applyMarketFinality` (resolution/void) and `closePosition` — leave the shares on chain, and redeem is never called, so the expected balance is Σ `sharesRaw` over every position on the side whatever its status: open, finality-closed, and exit-closed positions counted only by the shares the exits did not sell.
+
+**In flight.** A subject is recorded `SKIPPED_IN_FLIGHT` (never drift, never repaired, never read from chain) when a `chain_transactions` row for one of its domain ids is `BUILT`/`SIGNED`/`SUBMITTED`/`PENDING`, an exit on it is `SUBMITTED`, or one of its rows was updated within `MONEY_AUDIT_GRACE_MS` (default 120 s).
+
+**Ledger consistency.** `chain.service.getPositionWithLedger` returns the balance with the simulation's `latestLedger` (it throws when there is none; overridable through `setChainOverrides`). A mismatch is `DEFERRED` when treasury `Trade` events for that market were indexed in (cursor at snapshot, observed ledger], or when the indexer cursor trails the observation by more than `RECONCILE_INDEXER_LAG_LEDGERS`; after `MAX_CONSECUTIVE_DEFERRALS` such deferrals in a row it is reported with `evidence.forced = true`. Otherwise it is reported only when the previous run saw the same side with the same database and chain numbers (the same fingerprint); the first sighting is `DEFERRED` with `deferReason: UNCONFIRMED`.
+
+**Repairs** run only with `MONEY_AUDIT_AUTO_REPAIR=true` on a non-dry run, and only re-run the existing idempotent functions after re-reading the row outside the snapshot and confirming it is still eligible and not in flight. A repair that declines is recorded `REPORTED` with `evidence.repair = "SKIPPED"`.
+
+**Fingerprints and alerts.** `fingerprint = sha256(invariant | subjectId | evidence-core)` carries a finding across runs (`firstSeenRunId`). A finding whose fingerprint was acknowledged is recorded `ACKED` and not re-alerted. A `CRITICAL` finding is sent once per new fingerprint to the `sinksFromConfig()` alert sinks (level `CRITICAL`) and logged as a `MONEY_AUDIT_FINDING` agent log (`TRADER`, `ERROR`). Runs and findings persist in `money_audit_runs` / `money_audit_findings`; the admin endpoints are in [api.md](api.md).
+
 ## Market correlations (#80)
 
 The trader caps correlated exposure before opening a position (5% of the bankroll, pairs with |ρ| ≥ 0.60). The correlation behind that comes from `CorrelationSnapshot`, recomputed by the monitor cron at `2,17,32,47` (just before the trader) by `computeCorrelationSnapshot`; the trading path only reads the latest snapshot (cached five minutes) and never computes inline.
@@ -623,6 +662,10 @@ The treasury contract enforces `max_trade` per call, cumulative `max_market` per
 
 `GET /portfolio` reports the same budget (see `docs/api.md`).
 
+### Sizing on the FPMM curve (#225)
+
+The closed-form Kelly assumed any amount fills at the mid. The trader now sizes with `sizeAgainstPool` (`services/impact-kelly.ts`): for candidate collateral `c` it computes the exact shares out with `calcBuy` against fresh reserves and the market's own `fee_bps`, and maximises `p·ln(W − c + s(c)) + (1 − p)·ln(W − c)` (integer golden-section, then a 0.1 USDC scan) under the conservative probability. The order is half the optimum, bounded by the treasury caps above and the 2.5% single-position cap; a correlation cut re-runs the sizer under the smaller bound. `binding` gains `IMPACT` (the curve's optimum, below every cap). Reserves come from `TraderEnv.pool()`: the newest indexed `Trade` (valid up to the indexer cursor) or `get_market` tagged with its simulation ledger; reserves lagging the RPC by more than `TRADER_POOL_MAX_AGE_LEDGERS` (120) skip the market with `POOL_STALE`. `sizing.impact` records mid, average and post-trade price, impact, fee and expected shares (see `docs/trace-format.md`). At execution, a re-quote whose average price has reached the conservative probability cancels the trade (`edge consumed by price movement`). The backtester serves its simulated pools through the same `pool()` and fills exactly `amountRaw`; `--sizing mid` replays the closed-form rule for comparison.
+
 ## Seed policy (#82)
 
 `seed-policy.service.ts` (pure `decideSeed`) sizes the treasury capital a new market is seeded with and the price it opens at. `planMarketCreation` reads the budget (`treasury.get_config`, `daily_usage`, `available_capital`, market-core's default fee) and runs it **before** the market maker pins or writes anything; a read failure fails closed (`SEED_SKIPPED`, `INSUFFICIENT_CAPITAL`).
@@ -644,7 +687,7 @@ npm run backtest -- --from 2026-10-01 --to 2026-10-15 --out ./bt \
 npm run backtest -- --events-file tests/fixtures/backtest/events.json --out /tmp/bt
 ```
 
-The runner only issues `findMany` (events up to `--to`, because pools are rebuilt from `MarketCreated` and everything after it, plus `signal_cache` and the live agent's stored forecasts) and writes `report.json` and `report.md`. Options: `--from`, `--to` (required against the database; with `--events-file` they default to the file's span), `--bankroll-raw`, `--max-trade-raw`, `--max-market-raw`, `--max-daily-raw` (7-decimal base units; defaults 10 000 / 500 / 1 000 / 2 000 USDC), `--impact reset|propagate|both` (default both), `--forecaster prior|oracle-noise:<σ>|recorded`, `--seed`, `--fee-bps` (inferred from the first historical buy), `--events-file`, `--out`.
+The runner only issues `findMany` (events up to `--to`, because pools are rebuilt from `MarketCreated` and everything after it, plus `signal_cache` and the live agent's stored forecasts) and writes `report.json` and `report.md`. Options: `--from`, `--to` (required against the database; with `--events-file` they default to the file's span), `--bankroll-raw`, `--max-trade-raw`, `--max-market-raw`, `--max-daily-raw` (7-decimal base units; defaults 10 000 / 500 / 1 000 / 2 000 USDC), `--impact reset|propagate|both` (default both), `--sizing impact|mid` (default impact, #225), `--forecaster prior|oracle-noise:<σ>|recorded`, `--seed`, `--fee-bps` (inferred from the first historical buy), `--events-file`, `--out`.
 
 **How it works.** A simulated UTC clock steps every 15 minutes. Before each step every event with `ledgerClosedAt ≤ now` is applied in order (pools are seeded by `seedReserves`; external trades move them; `MarketResolved` settles positions with `settleValue`, void at half a share's value), then the policy runs against a `BacktestEnv` built only from that state: it never reads a live row, so it cannot see the future. Agent orders fill against the simulated pool with `calcBuy`/`calcSell`, update its reserves, and spend through a `SimTreasury` that enforces `max_trade`, cumulative `max_market` and a rolling 24-hour `max_daily` whose window starts at the first spend after the previous one expired (selling is uncapped). Trading after `close_time` is refused like market-core's `MarketClosed`. Floats exist only in the policy; `usdcFromNumber` converts at the buy boundary and everything else is base-unit bigint.
 
@@ -889,6 +932,77 @@ policy and the exclusions are in `docs/api.md` ("Agent calibration").
   forecast cache key, so a refit invalidates cached forecasts.
 - **API.** `GET /agents/calibration?include=maps` adds the active maps.
 
+
+## Learned source weights (#223)
+
+`src/services/source-weights.service.ts` replaces the hand-written
+`SOURCE_WEIGHTS` with versioned, outcome-fitted weight sets, behind a second
+admin's approval. `ALLOWED_ORACLES` and the dedup entity list still derive
+from the compiled table and do not change.
+
+- **Samples.** `extractRows()`'s filters (resolved, non-void, on-chain
+  markets; traces strictly before resolution) joined to
+  `trace_publications.payload.forecast.members[llm:*].detail` (`baseRate`,
+  `adjustments[].signalId/delta`) and to `signals` (`source`, `publisher`,
+  `clusterId`). Traces without adjustments (pre-#75, `MARKET_CREATION`) are
+  skipped; adjustments whose `signalId` is null or no longer in the store are
+  dropped. Both are counted in `method.counts`. Each market's weight of 1 is
+  split over its traces with the calibration `'time'` scheme
+  (`marketTraceWeights`).
+- **Model.** Penalised logistic regression with hierarchical shrinkage:
+  `logit P(o=1) = α_category + γ_version + logit(baseRate) + Σ_k β_k x_k`,
+  `x_k = Σ_{adjustments of key k} [logit(clampP(base + δ)) − logit(base)]`.
+  Priors: `β_source ~ N(1, τ_s²)`, `β_publisher = β_source + u`,
+  `u ~ N(0, τ_p²)` (τ = 0.5 by default), `α, γ ~ N(0, 1)`. β = 1 means the
+  forecaster used the signal at the right strength, 0 that it is noise, > 1
+  that it is under-weighted.
+- **Assumptions and their guards.** Sources are not assigned to topics at
+  random (FRED only appears on FED/MACRO questions), so `α_category` absorbs
+  each category's base rate; a naive per-source hit rate would credit FRED
+  with it. Evidence sets overlap: adjustments sharing a `clusterId` are
+  averaged into one contribution (FRED rows are cluster size 1). Data scored
+  under different weight sets is not exchangeable, so traces are pooled only
+  with a per-version fixed effect `γ_version` (from
+  `reasoning_traces.sourceWeightSetVersion`, null = v0). With
+  `FORECAST_LLM_SAMPLES > 1` only the first sample's adjustments are recorded,
+  so the fit sees one sample per trace. `base + δ` is clamped to
+  `[0.02, 0.98]` before logits.
+- **Fit.** MAP by Newton/IRLS (≤ 50 iterations, step halving, tolerance
+  `1e-10` on the largest step), dense Cholesky on a (categories + versions +
+  keys)-sized Hessian; 90 % intervals from its inverse (Laplace). Proposed
+  `w_k = clamp(w_parent_k · β̂_k, 0.05, 1)`; a new publisher's parent weight
+  is its source's. Keys with `nEff < WEIGHTS_MIN_NEFF` (default 30) keep the
+  parent weight and are flagged `insufficient` (an insufficient new
+  publisher gets no key, so it follows its source). Inputs are sorted by
+  `(marketId, traceId, signalId)` and `inputDigest = sha256(canonicalJson(samples))`,
+  so the output is deterministic.
+- **Held out.** `npm run weights:estimate -- --window 180d [--cutoff …] [--save --created-by G…]`
+  fits on markets resolved before the cutoff (default: the last fifth of the
+  window) and scores the rest: log loss with the fitted fixed effects and the
+  parent's weights versus the proposed ones. A set worse than its parent is
+  saved with `method.regression: true` and cannot be approved. The CLI prints
+  key, current and proposed weight, 90 % interval, nEff, nMarkets, and the
+  ranking change on the latest 24 h aggregation.
+- **Lifecycle.** `source_weight_sets` rows go DRAFT → APPROVED → ACTIVE →
+  RETIRED. Approval needs `agents.weights.approve` (super_admin only),
+  step-up, and an admin other than `createdBy`. Activation and rollback each
+  run in one transaction under an advisory lock (retire the old set, activate
+  the new one, write an `admin_audit_logs` row); a partial unique index
+  (`WHERE status = 'ACTIVE'`) guarantees one ACTIVE row. Rollback reactivates
+  the RETIRED set with the latest `activatedAt` before the current one, or
+  falls back to the compiled table.
+- **Runtime.** `getActiveWeightTable()` caches the ACTIVE row for 60 s and
+  falls back to `SOURCE_WEIGHTS` as `{ id: null, version: 0 }`.
+  `aggregateSignals()` loads it once and stamps `weightSet: { id, version }`
+  on its result, so one cycle never mixes tables and an activation does not
+  affect a cycle already running. `sourceWeight(source, publisher?, table?)`
+  and `relevanceScore(…, table?, publisher?)` take the table explicitly;
+  without one they behave exactly as before.
+- **Stamping.** Traces carry `sourceWeightSet: { id, version }` in the pinned
+  document and `reasoning_traces.sourceWeightSetVersion`; calibration can
+  group by `sourceWeightSet` (`v0` for older traces).
+- **Not learned.** `RECENCY_HALF_LIFE_HOURS`, cluster weighting and ensemble
+  recalibration stay as they are; there is no online learning.
 
 ## Evaluating market generation (#67)
 

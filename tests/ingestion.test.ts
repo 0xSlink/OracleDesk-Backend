@@ -287,6 +287,48 @@ test('aggregateSignals returns one representative per cluster ordered by relevan
   }
 });
 
+test('representatives() takes an injected weight table: publisher weight picks the cluster representative and scores it (#223)', async () => {
+  const { representatives } = await import('../src/services/ingestion.service');
+  const { SOURCE_WEIGHTS } = await import('../src/services/market-policy');
+  type SignalRow = import('../src/services/signal-store.service').SignalRow;
+  const row = (id: string, publisher: string, hoursAgo: number, over: Partial<SignalRow> = {}): SignalRow => ({
+    id, source: 'NEWSAPI', dedupKey: id, externalId: null, url: `https://${publisher}/${id}`, publisher,
+    title: `Fed holds rates (${publisher})`, summary: null, category: 'FED', categoryConfidence: 1, numericValue: null, simhash: null,
+    publishedAt: new Date(NOW.getTime() - hoursAgo * 3_600_000), firstSeenAt: NOW, lastSeenAt: NOW, seenCount: 1, clusterId: 'c1',
+    ...over,
+  });
+  const rows = [row('a', 'Wire Copy', 1), row('b', 'Reuters', 3), row('z', 'Solo', 2, { clusterId: null, title: 'Unrelated story' })];
+  const decay = (h: number) => Math.pow(0.5, h / 12);
+
+  // No table: today's behaviour, equal source weight so the newest copy represents the cluster.
+  const plain = representatives(rows, NOW);
+  assert.equal(plain.find((s) => s.clusterSize === 2)!.signalId, 'a');
+  // The compiled table as a table changes nothing.
+  const { COMPILED_WEIGHT_TABLE } = await import('../src/services/source-weights.service');
+  assert.deepEqual(representatives(rows, NOW, COMPILED_WEIGHT_TABLE), plain);
+
+  // A learned set that trusts Reuters: it represents the cluster, scored at its own weight.
+  const table = { id: 'set-1', version: 1, weights: { 'source:NEWSAPI': 0.4, 'publisher:reuters': 0.95 } };
+  const learned = representatives(rows, NOW, table);
+  const cluster = learned.find((s) => s.clusterSize === 2)!;
+  assert.equal(cluster.signalId, 'b');
+  assert.ok(Math.abs(cluster.relevanceScore - 0.95 * decay(3) * Math.log2(3)) < 1e-3);
+  const solo = learned.find((s) => s.signalId === 'z')!;
+  assert.ok(Math.abs(solo.relevanceScore - 0.4 * decay(2) * Math.log2(2)) < 1e-3, 'unknown publisher falls back to the source weight');
+  assert.ok(Math.abs(plain.find((s) => s.signalId === 'z')!.relevanceScore - SOURCE_WEIGHTS.NEWSAPI * decay(2)) < 1e-3);
+});
+
+test('aggregateSignals stamps the weight set it scored with (compiled table when none is active)', async () => {
+  const h = await harness();
+  try {
+    const { aggregateSignals } = await import('../src/services/ingestion.service');
+    const agg = await aggregateSignals();
+    assert.deepEqual(agg.weightSet, { id: null, version: 0 });
+  } finally {
+    h.restore();
+  }
+});
+
 test('missing keys are recorded as skipped_no_key and nothing is fetched', async () => {
   const h = await harness({ keys: false });
   try {

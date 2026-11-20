@@ -306,3 +306,58 @@ test('GET /portfolio derives capital from the treasury and serialises raw amount
     (prisma.correlationSnapshot.findFirst as any) = orig.snap;
   }
 });
+
+test('PUT /traces/access/allowance stores exact base units; numbers are deprecated (#224)', async () => {
+  const { prisma } = await import('../src/lib/prisma');
+  const { signToken } = await import('../src/middlewares/auth.middleware');
+  const orig = { user: prisma.user.upsert, allowance: prisma.spendingAllowance.upsert };
+  const stored: any[] = [];
+  (prisma.user.upsert as any) = async () => ({});
+  (prisma.spendingAllowance.upsert as any) = async ({ create }: any) => {
+    stored.push(create);
+    const now = new Date();
+    return { id: 'a1', isActive: true, lastResetAt: now, createdAt: now, updatedAt: now, dailyLimit: 0, perTraceLimit: 0, spentToday: 0, ...create };
+  };
+  const token = signToken('u-allowance', Keypair.random().publicKey());
+  const put = (body: unknown, base: string) => fetch(`${base}/api/v1/traces/access/allowance`, {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    await withServer(async (base) => {
+      const raw = await put({ dailyLimitRaw: '123456789012345678901234567', perTraceLimitRaw: '1' }, base);
+      assert.equal(raw.status, 200);
+      assert.equal(raw.headers.get('deprecation'), null);
+      const rawBody = await raw.json();
+      assert.equal(stored[0].dailyLimitRaw, '123456789012345678901234567', 'beyond float precision, stored exactly');
+      assert.equal(rawBody.data.dailyLimitRaw, '123456789012345678901234567');
+      assert.equal(rawBody.data.perTraceLimitDisplay, '0.0000001');
+      for (const column of ['dailyLimit', 'perTraceLimit', 'spentToday']) assert.equal(column in rawBody.data, false);
+
+      const decimal = await put({ dailyLimit: '5', perTraceLimit: '0.3' }, base);
+      assert.equal(decimal.status, 200);
+      assert.equal(decimal.headers.get('deprecation'), null);
+      assert.deepEqual([stored[1].dailyLimitRaw, stored[1].perTraceLimitRaw], ['50000000', '3000000']);
+
+      const numeric = await put({ dailyLimit: 5, perTraceLimit: 0.1 + 0.2 }, base);
+      assert.equal(numeric.status, 400, '0.30000000000000004 has more than 7 decimals');
+      const legacy = await put({ dailyLimit: 5, perTraceLimit: 0.5 }, base);
+      assert.equal(legacy.status, 200);
+      assert.equal(legacy.headers.get('deprecation'), 'true');
+      assert.deepEqual([stored[2].dailyLimitRaw, stored[2].perTraceLimitRaw], ['50000000', '5000000']);
+
+      for (const body of [{}, { dailyLimitRaw: '1.5', perTraceLimitRaw: '1' }, { dailyLimit: '0.00000001', perTraceLimit: '0.1' }, { dailyLimit: true, perTraceLimit: '1' }]) {
+        const bad = await put(body, base);
+        assert.equal(bad.status, 400, JSON.stringify(body));
+        assert.equal((await bad.json()).error.code, 'VALIDATION_ERROR');
+      }
+      const inverted = await put({ dailyLimit: '1', perTraceLimit: '2' }, base);
+      assert.equal(inverted.status, 400);
+      assert.equal((await inverted.json()).error.code, 'INVALID_ALLOWANCE');
+    });
+  } finally {
+    (prisma.user.upsert as any) = orig.user;
+    (prisma.spendingAllowance.upsert as any) = orig.allowance;
+  }
+});

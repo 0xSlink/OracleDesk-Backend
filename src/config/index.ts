@@ -279,6 +279,10 @@ export const envObjectSchema = z
     // (see docs/api.md: that makes subscription revenue trading capital).
     PAYMENTS_RECIPIENT: optionalAddress,
     DAILY_PASS_PRICE_RAW: z.string().regex(/^\d+$/, 'must be an integer in 7-decimal base units').default('5000000'),
+    // #224 phase B: false stops writing the Float display mirrors on payments,
+    // subscriptions and allowances (DB defaults of 0 apply). Removed together
+    // with the columns by the pending contract migration.
+    PAYMENT_FLOAT_WRITES: boolDefault('true'),
 
     // ── x402 daily pass (#61) ─────────────────────────────────────────────
     // The facilitator that verifies and settles x402 payments on Stellar.
@@ -581,6 +585,8 @@ export const envObjectSchema = z
     // largest log-odds intercept a fitted map may apply.
     RECALIBRATION_PRIOR_STRENGTH: z.string().default('20').transform(Number).pipe(z.number().positive()),
     RECALIBRATION_MAX_INTERCEPT: z.string().default('0.5').transform(Number).pipe(z.number().min(0).max(2)),
+    // #223 learned source weights: a key fitted on fewer effective samples keeps its parent weight.
+    WEIGHTS_MIN_NEFF: z.string().default('30').transform(Number).pipe(z.number().positive()),
 
     // Build commit, recorded in trace provenance (#66). Set by CI/deploy.
     GIT_SHA: optionalString,
@@ -656,6 +662,8 @@ export const envObjectSchema = z
     TRADER_MAX_PRICE_DRIFT_BPS: z.string().default('150').transform(Number).pipe(z.number().int().min(0)),
     /** Consecutive stale-price markets that abort the scan cycle with PRICE_SOURCE_DOWN. */
     TRADER_STALE_ABORT_COUNT: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
+    /** #225 — max ledgers the reserves the trader sizes against may lag the RPC (valuation DEFAULT_MAX_AGE_LEDGERS). */
+    TRADER_POOL_MAX_AGE_LEDGERS: z.string().default('120').transform(Number).pipe(z.number().int().min(1)),
     // #147 — development-only local IPFS stub selected explicitly.
     IPFS_TRANSPORT: z.enum(['pinata', 'local']).default('pinata'),
     IPFS_LOCAL_DIR: z.string().default('.ipfs-local'),
@@ -798,6 +806,19 @@ export const envObjectSchema = z
     // How far (in ledgers) the indexer may trail an observation before
     // resolution findings are deferred to it.
     RECONCILE_INDEXER_LAG_LEDGERS: z.string().default('20').transform(Number)
+      .pipe(z.number().int().min(0)),
+
+    // ── Money audit (Issue #222) ──────────────────────────────────────────
+    MONEY_AUDIT_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+    // Guarded repairs (re-running idempotent handlers); off by default.
+    MONEY_AUDIT_AUTO_REPAIR: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    // A subject updated this recently is in flight, not drift.
+    MONEY_AUDIT_GRACE_MS: z.string().default('120000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    // A PENDING trade with no in-flight outbox row older than this is stuck.
+    MONEY_AUDIT_PENDING_GRACE_MS: z.string().default('3600000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    MONEY_AUDIT_MAX_RPC_CALLS: z.string().default('200').transform(Number)
       .pipe(z.number().int().min(0)),
 
     // ── Copy Trading (Issue #151) ─────────────────────────────────────────

@@ -380,7 +380,7 @@ export async function runMarketMakerCycle(
       edge:                proposal.initial_yes_probability - decision.pAdj,
       confidenceInterval:  proposal.confidence_interval,
       seedPolicy,
-      ...(corroboration ? { corroboration: traceCorroboration(corroboration.verdict) } : {}),
+      sourceWeightSet:     signals.weightSet,
     }, { purpose: priority === 'admin' ? 'admin_trace_hedge' : 'trace_hedge', priority }, {
       // Who proposed the market comes first in the trace's provenance (#66).
       upstreamProvenance: [proposalProvenance],

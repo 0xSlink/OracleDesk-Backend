@@ -4,6 +4,7 @@ import { sendSuccess, parsePagination, buildPaginationMeta } from '../utils/resp
 import {
   controlScopeSchema,
   createOperationSchema,
+  moneyAuditRunSchema,
   pauseAgentSchema,
   reconcileRunSchema,
   recordSchema,
@@ -12,6 +13,7 @@ import {
 } from '../validators/admin.validator';
 import { controlsOverview, pauseAgent, resumeAgent } from '../services/agent-controls.service';
 import { defaultDeps, runReconciliation } from '../services/market-reconciler.service';
+import { runMoneyAudit } from '../services/money-audit/run';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
 import { AgentDecisionKind, AgentDecisionReason, AgentType, TraceAuditStatus } from '@prisma/client';
@@ -35,6 +37,7 @@ import {
   signingKeyStatus,
 } from '../services/agent-signing-key.service';
 import { AppError } from '../middlewares/error.middleware';
+import * as sourceWeights from '../services/source-weights.service';
 import {
   ADMIN_ROLES,
   grantAdminRole,
@@ -369,6 +372,61 @@ export async function triggerReconciliationRun(req: Request, res: Response): Pro
   sendSuccess(res, { runId, message: 'Reconciliation run scheduled' }, 202);
 }
 
+/** GET /admin/money-audit/runs?limit= — money-audit runs (#222), newest first. */
+export async function listMoneyAuditRuns(req: Request, res: Response): Promise<void> {
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+  sendSuccess(res, await prisma.moneyAuditRun.findMany({ orderBy: { startedAt: 'desc' }, take: limit }));
+}
+
+/** GET /admin/money-audit/runs/:id/findings?severity=&invariant=&page=&limit= */
+export async function listMoneyAuditFindings(req: Request, res: Response): Promise<void> {
+  const id = String(req.params.id);
+  const run = await prisma.moneyAuditRun.findUnique({ where: { id } });
+  if (!run) throw new AppError(404, 'RUN_NOT_FOUND', 'Money audit run not found');
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const where = {
+    runId: id,
+    ...(typeof req.query.severity === 'string' && req.query.severity ? { severity: req.query.severity.toUpperCase() } : {}),
+    ...(typeof req.query.invariant === 'string' && req.query.invariant ? { invariant: req.query.invariant.toUpperCase() } : {}),
+  };
+  const [findings, total] = await Promise.all([
+    prisma.moneyAuditFinding.findMany({ where, orderBy: { createdAt: 'asc' }, skip, take: limit }),
+    prisma.moneyAuditFinding.count({ where }),
+  ]);
+  sendSuccess(res, { run, findings }, 200, buildPaginationMeta(page, limit, total) as any);
+}
+
+/**
+ * POST /admin/money-audit/run
+ * Starts an audit in the background (same advisory lock as the cron) and
+ * returns 202 with its id. A dry run reports but never repairs.
+ */
+export async function triggerMoneyAuditRun(req: Request, res: Response): Promise<void> {
+  const parsed = moneyAuditRunSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid money audit request', parsed.error.flatten().fieldErrors as any);
+  }
+  const runId = uuidv4();
+  runMoneyAudit({ runId, dryRun: parsed.data.dryRun ?? false })
+    .catch((err) => logger.error({ err, runId }, 'Background money audit run failed'));
+  sendSuccess(res, { runId, message: 'Money audit run scheduled' }, 202);
+}
+
+/** POST /admin/money-audit/findings/:id/ack — later runs carry the ack by fingerprint and do not re-alert. */
+export async function ackMoneyAuditFinding(req: Request, res: Response): Promise<void> {
+  const id = String(req.params.id);
+  const finding = await prisma.moneyAuditFinding.findUnique({ where: { id } });
+  if (!finding) throw new AppError(404, 'FINDING_NOT_FOUND', 'Money audit finding not found');
+  if (finding.ackedAt) {
+    sendSuccess(res, finding);
+    return;
+  }
+  sendSuccess(res, await prisma.moneyAuditFinding.update({
+    where: { id },
+    data: { action: 'ACKED', ackedBy: actor(req), ackedAt: new Date() },
+  }));
+}
+
 /**
  * GET /admin/fees
  * Returns aggregate fee statistics per operation class per day, plus the current fee oracle snapshot (#39).
@@ -492,40 +550,35 @@ export async function voidDisputeTx(req: Request, res: Response): Promise<void> 
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
 }
 
-// ─── Operational alerts (#226) ───────────────────────────────────────────────
+// ─── Learned source weights (#223) ───────────────────────────────────────────
 
-const alertListSchema = z.object({
-  id: z.string().uuid().optional(),
-  state: z.enum(['PENDING', 'OPEN', 'RESOLVED']).optional(),
-  severity: z.enum(['INFO', 'WARN', 'CRITICAL']).optional(),
-});
-const alertIdSchema = z.object({ id: z.string().uuid() });
-const silenceSchema = z.object({ untilMinutes: z.number().int().min(1).max(MAX_SILENCE_MINUTES) }).strict();
-
-function alertId(req: Request): string {
-  const parsed = alertIdSchema.safeParse(req.params);
-  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert id', parsed.error.flatten().fieldErrors as any);
-  return parsed.data.id;
+function weightSetId(req: Request): string {
+  const id = String(req.params.id ?? '').trim();
+  if (!id || id.length > 64) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid weight set id');
+  return id;
 }
 
-/** GET /admin/alerts?state=&severity=&page=&limit= */
-export async function getAlerts(req: Request, res: Response): Promise<void> {
-  const parsed = alertListSchema.safeParse(req.query);
-  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert filters', parsed.error.flatten().fieldErrors as any);
-  const { page, limit, skip } = parsePagination(req.query as any);
-  const { rows, total } = await listIncidents({ ...parsed.data, skip, take: limit });
-  sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
+/** GET /admin/source-weights — every set, newest version first. */
+export async function listSourceWeightSets(_req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.listWeightSets());
 }
 
-/** POST /admin/alerts/:id/ack — stops escalation for the current episode. */
-export async function ackAlert(req: Request, res: Response): Promise<void> {
-  sendSuccess(res, await acknowledgeIncident(alertId(req), actor(req)));
+/** GET /admin/source-weights/:id — the set and its per-key diff against the active set. */
+export async function getSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.getWeightSetWithDiff(weightSetId(req)));
 }
 
-/** POST /admin/alerts/:id/silence { untilMinutes ≤ 1440 } */
-export async function silenceAlert(req: Request, res: Response): Promise<void> {
-  const id = alertId(req);
-  const body = silenceSchema.safeParse(req.body ?? {});
-  if (!body.success) throw new AppError(400, 'VALIDATION_ERROR', 'untilMinutes must be an integer from 1 to 1440', body.error.flatten().fieldErrors as any);
-  sendSuccess(res, await silenceIncident(id, body.data.untilMinutes));
+/** POST /admin/source-weights/:id/approve — a second admin approves a DRAFT (step-up). */
+export async function approveSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.approveWeightSet(weightSetId(req), actor(req)));
+}
+
+/** POST /admin/source-weights/:id/activate — retire the active set, activate this one (step-up). */
+export async function activateSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.activateWeightSet(weightSetId(req), actor(req)));
+}
+
+/** POST /admin/source-weights/rollback — reactivate the previously active set (step-up). */
+export async function rollbackSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.rollbackWeightSet(actor(req)));
 }

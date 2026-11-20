@@ -1167,6 +1167,28 @@ const getPositionImpl = (marketId: bigint, holder: string, signal?: AbortSignal)
     readClients.marketCore().get_position({ market_id: marketId, holder }), signal,
   );
 
+/**
+ * get_position plus the ledger the simulation ran against, so the money audit
+ * (#222) can line the balance up with indexed events. Throws when the
+ * simulation carries no ledger: an untagged balance cannot be compared safely.
+ */
+const getPositionWithLedgerImpl = async (
+  marketId: bigint,
+  holder: string,
+  signal?: AbortSignal,
+): Promise<{ position: Position; ledger: number }> => {
+  const { value, tx } = await readTx<Position>(
+    'marketCore',
+    'get_position',
+    async () => readClients.marketCore().get_position({ market_id: marketId, holder }),
+    signal,
+  );
+  const raw = (tx.simulation as { latestLedger?: number | string } | undefined)?.latestLedger;
+  const ledger = raw == null ? NaN : Number(raw);
+  if (!Number.isFinite(ledger)) throw new ChainError('get_position simulation returned no ledger', null, { method: 'get_position' });
+  return { position: value, ledger };
+};
+
 export const getOnChainTrace = (traceId: bigint, signal?: AbortSignal) =>
   read<Trace>('reasoningRegistry', 'get_trace', async () => readClients.reasoningRegistry().get_trace({ trace_id: traceId }), signal);
 
@@ -1353,6 +1375,7 @@ const finalizeSignersImpl = (marketId: bigint, signal?: AbortSignal) =>
 
 const IMPLS = {
   getPosition: getPositionImpl,
+  getPositionWithLedger: getPositionWithLedgerImpl,
   marketCoreConfig: marketCoreConfigImpl,
   marketCount: marketCountImpl,
   getOnChainMarket: getOnChainMarketImpl,
@@ -1400,6 +1423,7 @@ export const agentSell = overridable('agentSell');
 export const publishTrace = overridable('publishTrace');
 export const marketCoreConfig = overridable('marketCoreConfig');
 export const getPosition = overridable('getPosition');
+export const getPositionWithLedger = overridable('getPositionWithLedger');
 export const registerSignerSpec = overridable('registerSignerSpec');
 export const attest = overridable('attest');
 export const finalizeSigners = overridable('finalizeSigners');

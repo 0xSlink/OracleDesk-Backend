@@ -658,7 +658,8 @@ if **all** of these hold:
 There is no development bypass: an unverifiable payment never grants
 access. Tests inject a fake RPC client.
 
-Response `201`: `{ subscription, trace }`.
+Response `201`: `{ subscription, trace }`, where `subscription` is the
+subscription DTO below (#224).
 Errors: `400 VALIDATION_ERROR`, `402 PAYMENT_NOT_FOUND`,
 `402 PAYMENT_FAILED`, `402 PAYMENT_WRONG_TOKEN`, `402 PAYMENT_WRONG_SENDER`,
 `402 PAYMENT_WRONG_RECIPIENT`, `402 PAYMENT_INSUFFICIENT`,
@@ -670,11 +671,56 @@ Errors: `400 VALIDATION_ERROR`, `402 PAYMENT_NOT_FOUND`,
 > revenue account is probably wanted. This is flagged in `docs/STATUS.md`
 > and not decided here.
 
+#### Money in payment responses (#224)
+
+Payment, subscription and allowance responses carry exact amounts only: each
+amount is a base-unit decimal string (`…Raw`, 7-decimal USDC) plus a display
+string derived from it with `formatUsdc` (`"0.5"`, never a float). The Float
+columns `amountPaid`, `amount`, `dailyLimit`, `perTraceLimit` and `spentToday`
+are no longer returned; they are dropped from the database in a later release.
+A legacy row the raw backfill has not reached yet has `…Raw: null` and
+`…Display: null` rather than a guessed value. Responses replayed by the
+`Idempotency-Key` middleware may still show the old shape until the key
+expires (24 h).
+
+Subscription:
+
+```json
+{
+  "id": "…", "userId": "…", "traceId": null, "type": "DAILY_PASS", "status": "ACTIVE",
+  "amountPaidRaw": "5000000", "amountDisplay": "0.5", "currency": "USDC",
+  "txHash": "…", "purchaseLedger": 123, "startsAt": "…", "endsAt": "…", "expiresAt": "…",
+  "paymentIntentId": null, "createdAt": "…", "updatedAt": "…"
+}
+```
+
+Payment event: `{ id, userId, txHash, type, amountRaw, amountDisplay,
+fromAddress, currency, status, traceId, ledger, ledgerCloseTime,
+allowanceOverage, allowanceOverageRaw, paymentIntentId, metadata, createdAt,
+confirmedAt }`.
+
+Allowance: `{ id, userId, dailyLimitRaw, perTraceLimitRaw, spentTodayRaw,
+overageRaw, dailyLimitDisplay, perTraceLimitDisplay, spentTodayDisplay,
+overageDisplay, windowStartedAt, currency, lastResetAt, isActive, createdAt,
+updatedAt }`.
+
 #### `GET /traces/access/allowance`, `PUT /traces/access/allowance` (auth)
 
-`PUT` body `{ dailyLimit: number, perTraceLimit: number, dailyLimitRaw?: "base units", perTraceLimitRaw?: "base units", currency?: "USDC" }`.
-The float fields are display mirrors; enforcement uses the raw `NUMERIC(39,0)`
-columns (#53). Response: `SpendingAllowance | null`.
+`PUT` body: each limit as base units or as a decimal USDC string.
+
+```json
+{ "dailyLimitRaw": "50000000", "perTraceLimitRaw": "5000000", "currency": "USDC" }
+{ "dailyLimit": "5", "perTraceLimit": "0.5" }
+```
+
+`dailyLimitRaw` wins over `dailyLimit` (likewise `perTraceLimit…`). Decimal
+strings are parsed exactly (at most 7 decimal places, no exponents). JSON
+numbers are still accepted for one release: they are converted with
+`parseUsdc(String(n))` (so `1e-7` is rejected) and the response carries
+`Deprecation: true`. Enforcement uses the raw `NUMERIC(39,0)` columns (#53).
+`perTraceLimit` must be positive and at most `dailyLimit`. Response: the
+allowance DTO above, or `null` from `GET` when none is set. Errors:
+`400 VALIDATION_ERROR`, `400 INVALID_ALLOWANCE`.
 
 #### `POST /traces/access/preauthorize` (auth)
 
@@ -739,7 +785,7 @@ coverage (`EXPIRED`).
 
 #### `GET /traces/payments` (auth)
 
-The user's last 100 `PaymentEvent`s, newest first.
+The user's last 100 payment events as payment event DTOs (#224), newest first.
 
 ### Agent calibration (#68)
 
@@ -751,7 +797,8 @@ traces written before resolution and stores metrics per slice.
 
 Query (all optional): `window` (`30d`, `90d`, `all`; default `90d`),
 `groupBy` (`agentType`, `category`, `decisionType`, `promptVersion`, `model`,
-`agentType_category`; default `agentType`), `agentType` (`MARKET_MAKER` or
+`agentType_category`, `sourceWeightSet` (keys `v0`, `v1`, …; v0 = compiled
+weights, #223); default `agentType`), `agentType` (`MARKET_MAKER` or
 `TRADER`) and `category`. The two filters only apply to the groupings that
 contain them (`agentType`, `category`, `agentType_category`); otherwise `400
 VALIDATION_ERROR`. The response carries `Cache-Control: public, max-age=300`.
@@ -1112,6 +1159,42 @@ Body `{ "dryRun"?: boolean, "maxMarkets"?: number }`. Starts a run in the
 background, under the same advisory lock as the cron (a run that cannot take
 the lock records itself as skipped). Response `202 Accepted`:
 `{ "runId": "uuid", "message": "Reconciliation run scheduled" }`.
+
+#### `GET /admin/money-audit/runs?limit=` (admin, `reconciliation.run`)
+
+Latest money-audit runs (#222), newest first (`limit` ≤ 100, default 20):
+`{ id, startedAt, finishedAt, snapshotAt, observedLedger, checked, findings, repaired, rpcCalls, error }`.
+`findings` counts `REPORTED`, `REPAIRED` and `ACKED` rows; deferred and in-flight rows are not drift.
+
+#### `GET /admin/money-audit/runs/:id/findings?severity=&invariant=&page=&limit=` (admin, `reconciliation.run`)
+
+`{ run, findings }`, with `findings` paginated and optionally filtered by
+`severity` (`CRITICAL`, `HIGH`, `MEDIUM`, `INFO`) and `invariant`. Each finding is
+`{ id, runId, invariant, severity, subjectType, subjectId, evidence, suggestedRepair, action, fingerprint, firstSeenRunId, ackedBy, ackedAt, createdAt }`.
+
+`invariant`: `TRADE_EXECUTED_WITHOUT_OUTBOX`, `POSITION_WITHOUT_EXECUTED_TRADE`,
+`EXECUTED_TRADE_WITHOUT_POSITION`, `OUTBOX_TERMINAL_UNHANDLED`, `TRADE_STUCK_PENDING`,
+`EXIT_CONFIRMED_NOT_LANDED`, `SHARES_MISMATCH`, `SHARES_UNKNOWN_LEGACY`, `TRACE_WITHOUT_TRADE`
+(see [architecture.md](architecture.md#money-audit-222)). `subjectType`: `trade`,
+`position`, `exit`, `outbox`, `market_side` (`subjectId` = `<onChainMarketId>:<YES|NO>`)
+or `trace`. `action`: `REPORTED`, `REPAIRED` (auto-repair on), `SKIPPED_IN_FLIGHT`
+(work in flight; not drift), `DEFERRED` (`SHARES_MISMATCH` waiting for a second
+agreeing run or for the indexer; `evidence.deferReason`) or `ACKED` (the
+fingerprint was acknowledged). Amounts in `evidence` are base-unit decimal strings.
+
+#### `POST /admin/money-audit/run` (admin, `reconciliation.run`)
+
+Body `{ "dryRun"?: boolean }`. Starts a run in the background under the same
+advisory lock as the cron (a run that cannot take the lock records itself as
+skipped). A dry run records findings but never repairs. Response `202 Accepted`:
+`{ "runId": "uuid", "message": "Money audit run scheduled" }`.
+
+#### `POST /admin/money-audit/findings/:id/ack` (admin, `reconciliation.run`, step-up)
+
+Acknowledges a finding: sets `action = ACKED`, `ackedBy` (the admin's wallet) and
+`ackedAt`. Later runs that see the same fingerprint record it as `ACKED` and do
+not alert again. Requires a fresh wallet proof (`403 STEP_UP_REQUIRED` otherwise);
+`404 FINDING_NOT_FOUND` for an unknown id. Acknowledging twice returns the row unchanged.
 
 ### Oracle / resolution
 
@@ -1708,6 +1791,45 @@ Permission `markets.generate` + step-up. Body: `{ reason? }`. Allowed while the 
 
 #### `POST /admin/generation-runs/:id/retry`
 Permission `markets.generate` + step-up. Resets a `NEEDS_ATTENTION` run to `lastError.step` with `attempts = 0` and resumes it in the background. 202 with the run. 400 `RUN_NOT_RETRYABLE` for any other state.
+
+## Source Weight Sets (auth, admin, #223)
+
+Learned signal source/publisher weights; see docs/architecture.md ("Learned
+source weights"). Sets are created by `npm run weights:estimate -- --save`.
+A set: `{ id, version, status: DRAFT|APPROVED|ACTIVE|RETIRED, weights:
+{ "source:NEWSAPI": 0.64, "publisher:reuters": 0.81 }, intervals: { key:
+{ lower, upper, nEff, nMarkets, insufficient, current, beta, betaSd } },
+method: { priorSd, window, cutoff, inputDigest, heldOutDeltaLogLoss,
+regression, heldOut, fit, counts, notes, … }, parentId, createdBy,
+approvedBy, activatedAt, createdAt }`. The approve, activate and rollback
+endpoints write their own `admin_audit_logs` row in the same transaction.
+
+#### `GET /admin/source-weights`
+Permission `admin.read`. Every set, newest version first.
+
+#### `GET /admin/source-weights/:id`
+Permission `admin.read`. `{ set, active: { id, version }, diff: [{ key, from, to, delta }] }`;
+`active` is `{ id: null, version: 0 }` (the compiled table) when no set is active, and
+`diff` compares its weights with this set's. 404 `WEIGHT_SET_NOT_FOUND`.
+
+#### `POST /admin/source-weights/:id/approve`
+Permission `agents.weights.approve` (super_admin only) + step-up. DRAFT → APPROVED.
+403 `SELF_APPROVAL` when the caller created the set; 409 `WEIGHT_SET_REGRESSION`
+when `method.regression` is true (worse than its parent on held-out log loss);
+409 `WEIGHT_SET_NOT_DRAFT`.
+
+#### `POST /admin/source-weights/:id/activate`
+Permission `agents.weights.approve` + step-up. In one transaction: the ACTIVE set
+becomes RETIRED, this APPROVED set becomes ACTIVE (`activatedAt` = now), audit row
+`SOURCE_WEIGHTS_ACTIVATED`. Aggregations already running keep their table; new
+ones pick it up within 60 s. 409 `WEIGHT_SET_NOT_APPROVED`.
+
+#### `POST /admin/source-weights/rollback`
+Permission `agents.weights.approve` + step-up. Retires the ACTIVE set and
+reactivates the RETIRED set with the latest `activatedAt` before it (repeated
+rollbacks walk further back); with none, the compiled table applies again.
+Response `{ retired: { id, version }, active: { id, version } }`. 409
+`NO_ACTIVE_WEIGHT_SET`.
 
 ---
 

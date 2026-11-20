@@ -25,7 +25,8 @@ export const ADMIN_PERMISSIONS = [
   'refund.prepare',
   'indexer.replay',
   'chain.signing_keys',
-  'alerts.manage',
+  // #223: approve/activate/roll back learned source weight sets (super_admin only).
+  'agents.weights.approve',
 ] as const;
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
 

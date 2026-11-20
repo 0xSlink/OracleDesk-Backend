@@ -8,6 +8,7 @@ import { sendSuccess, sendError, parsePagination, buildPaginationMeta } from '..
 import { summarizeProvenance } from '../lib/llm/provenance';
 import { verifyTraceOnChain } from '../services/trace-publish.service';
 import { unwrapKey } from '../services/trace-crypto.service';
+import { parseUsdc } from '../lib/amounts';
 import {
   DAILY_PASS_PRICE_RAW,
   checkAccess,
@@ -16,6 +17,8 @@ import {
   listPaymentEvents,
   preauthorizeSpending,
   recordPayment,
+  toAllowanceDto,
+  toSubscriptionDto,
   upsertSpendingAllowance,
 } from '../services/subscription.service';
 import {
@@ -164,7 +167,32 @@ export async function unlockTrace(req: Request, res: Response): Promise<void> {
   });
 
   const trace = await getTracWithAccessControl(traceId, req.user.userId).catch(() => null);
-  sendSuccess(res, { subscription, trace }, 201);
+  sendSuccess(res, { subscription: toSubscriptionDto(subscription), trace }, 201);
+}
+
+type AllowanceAmount = { ok: true; value: bigint; deprecated: boolean } | { ok: false; message: string };
+
+/**
+ * One allowance limit from the request body (#224): `<field>Raw` as integer
+ * base units wins; otherwise `<field>` as a decimal USDC string. A JSON number
+ * is still accepted for one release (flagged deprecated) and goes through
+ * parseUsdc(String(n)), never through a float conversion.
+ */
+function allowanceAmount(field: string, raw: unknown, decimal: unknown): AllowanceAmount {
+  if (raw !== undefined) {
+    if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+      return { ok: false, message: `${field}Raw must be an integer base-unit string` };
+    }
+    return { ok: true, value: BigInt(raw), deprecated: false };
+  }
+  if (typeof decimal === 'string' || typeof decimal === 'number') {
+    try {
+      return { ok: true, value: parseUsdc(String(decimal)), deprecated: typeof decimal === 'number' };
+    } catch {
+      return { ok: false, message: `${field} must be a decimal USDC string with at most 7 decimal places` };
+    }
+  }
+  return { ok: false, message: `${field}Raw (base units) or ${field} (decimal string) is required` };
 }
 
 export async function setSpendingAllowance(req: Request, res: Response): Promise<void> {
@@ -173,25 +201,15 @@ export async function setSpendingAllowance(req: Request, res: Response): Promise
     return;
   }
 
-  const { dailyLimit, perTraceLimit, dailyLimitRaw, perTraceLimitRaw, currency } = req.body as {
-    dailyLimit?: number;
-    perTraceLimit?: number;
-    dailyLimitRaw?: string;
-    perTraceLimitRaw?: string;
-    currency?: string;
-  };
-
-  if (typeof dailyLimit !== 'number' || typeof perTraceLimit !== 'number') {
-    sendError(res, 400, 'MISSING_ALLOWANCE_FIELDS', 'dailyLimit and perTraceLimit are required numbers');
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const daily = allowanceAmount('dailyLimit', body.dailyLimitRaw, body.dailyLimit);
+  const perTrace = allowanceAmount('perTraceLimit', body.perTraceLimitRaw, body.perTraceLimit);
+  if (!daily.ok || !perTrace.ok) {
+    const messages = [daily, perTrace].flatMap((r) => (r.ok ? [] : [r.message]));
+    sendError(res, 400, 'VALIDATION_ERROR', messages.join('; '));
     return;
   }
-  if (
-    (dailyLimitRaw !== undefined && !/^\d+$/.test(dailyLimitRaw)) ||
-    (perTraceLimitRaw !== undefined && !/^\d+$/.test(perTraceLimitRaw))
-  ) {
-    sendError(res, 400, 'VALIDATION_ERROR', 'dailyLimitRaw and perTraceLimitRaw must be integer base-unit strings');
-    return;
-  }
+  const currency = typeof body.currency === 'string' ? body.currency : undefined;
 
   // Ensure the user record exists before creating the FK-linked spending
   // allowance. Key on the user id: walletAddress is no longer unique (#46),
@@ -213,14 +231,16 @@ export async function setSpendingAllowance(req: Request, res: Response): Promise
 
   const allowance = await upsertSpendingAllowance({
     userId: req.user.userId,
-    dailyLimit,
-    perTraceLimit,
-    dailyLimitRaw,
-    perTraceLimitRaw,
+    dailyLimitRaw: daily.value,
+    perTraceLimitRaw: perTrace.value,
     currency,
   });
 
-  sendSuccess(res, allowance, 200);
+  if (daily.deprecated || perTrace.deprecated) {
+    // Numeric limits are accepted for one release only (#224); see docs/api.md.
+    res.setHeader('Deprecation', 'true');
+  }
+  sendSuccess(res, toAllowanceDto(allowance), 200);
 }
 
 export async function getMySpendingAllowance(req: Request, res: Response): Promise<void> {

@@ -13,6 +13,7 @@ import { startIngestionCron } from './cron/ingestion.cron';
 import { startMonitorCron } from './cron/monitor.cron';
 import { startReportCron } from './cron/report.cron';
 import { startReconcileCron } from './cron/reconcile.cron';
+import { startMoneyAuditCron } from './cron/money-audit.cron';
 import { startPriceResolutionCron } from './cron/price-resolution.cron';
 import { bootstrapAdminRbac, isAdminToken } from './middlewares/auth.middleware';
 import { startTraceAuditCron } from './cron/trace-audit.cron';
@@ -309,6 +310,8 @@ async function bootstrap(): Promise<void> {
     startReconcileCron((event, payload) => {
       if (io) io.to('admins').emit(event, payload);
     });
+    // Money records vs outbox and on-chain treasury shares (#222).
+    startMoneyAuditCron();
     // Price-mode reveal + resolve loop (#90).
     startPriceResolutionCron();
     // Operational alerts (#226): one evaluator per tick via an advisory lock.
