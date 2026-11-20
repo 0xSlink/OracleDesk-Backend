@@ -279,6 +279,10 @@ export const envObjectSchema = z
     // (see docs/api.md: that makes subscription revenue trading capital).
     PAYMENTS_RECIPIENT: optionalAddress,
     DAILY_PASS_PRICE_RAW: z.string().regex(/^\d+$/, 'must be an integer in 7-decimal base units').default('5000000'),
+    // #224 phase B: false stops writing the Float display mirrors on payments,
+    // subscriptions and allowances (DB defaults of 0 apply). Removed together
+    // with the columns by the pending contract migration.
+    PAYMENT_FLOAT_WRITES: boolDefault('true'),
 
     // ── x402 daily pass (#61) ─────────────────────────────────────────────
     // The facilitator that verifies and settles x402 payments on Stellar.

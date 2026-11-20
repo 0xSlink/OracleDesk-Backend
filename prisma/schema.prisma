@@ -571,7 +571,13 @@ model Subscription {
   type       SubscriptionType
   status     SubscriptionStatus @default(ACTIVE)
   /// CHECK: subscriptions_amount_paid_nonneg (amountPaid >= 0)
-  amountPaid Float
+  /// Display mirror only; DEFAULT 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  /// Dropped by the pending contract migration (prisma/migrations-pending).
+  amountPaid Float              @default(0)
+  /// Exact amount paid in USDC base units (#224). NULL only on legacy rows
+  /// until scripts/backfill-payment-raw.ts fills them.
+  /// CHECK: subscriptions_amount_paid_raw_nonneg (NOT VALID until contract)
+  amountPaidRaw Decimal?        @db.Decimal(39, 0)
   currency   SettlementCurrency @default(USDC)
   /// CHECK: subscriptions_tx_hash_format (txHash IS NULL OR 64 hex chars)
   txHash     String?            @unique
@@ -831,7 +837,8 @@ model PaymentEvent {
   /// CHECK: payment_events_tx_hash_format (64 hex chars)
   txHash        String             @unique
   type          PaymentEventType
-  amount        Float
+  /// Display mirror only; DEFAULT 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  amount        Float              @default(0)
   /// CHECK: payment_events_amount_raw_digits (amountRaw IS NULL OR digits only)
   amountRaw     String?
   fromAddress   String?
@@ -856,7 +863,7 @@ model PaymentEvent {
   refund Refund?
 
   @@index([userId])
-
+  @@map("payment_events")
 }
 
 // User-defined spending approvals for nanopayment trace access
@@ -864,9 +871,10 @@ model SpendingAllowance {
   id            String             @id @default(uuid())
   userId        String             @unique
   /// CHECK: spending_allowances_daily_limit_nonneg (dailyLimit >= 0)
-  dailyLimit    Float
+  /// Float mirrors below default to 0 once PAYMENT_FLOAT_WRITES=false (#224).
+  dailyLimit    Float              @default(0)
   /// CHECK: spending_allowances_per_trace_limit_nonneg (perTraceLimit >= 0)
-  perTraceLimit Float
+  perTraceLimit Float              @default(0)
   /// CHECK: spending_allowances_spent_today_nonneg (spentToday >= 0)
   spentToday    Float              @default(0)
   /// Exact base-unit accounting (#53). The Float columns above are display
@@ -889,6 +897,27 @@ model SpendingAllowance {
 
   @@index([userId])
   @@map("spending_allowances")
+}
+
+/// Per-row outcome of scripts/backfill-payment-raw.ts (#224). Keyed by the
+/// source table and row id, so reruns overwrite instead of duplicating.
+/// status: VERIFIED | FLOAT_ONLY | MISMATCH | NOT_FOUND (CHECK constraint).
+model PaymentRawBackfill {
+  table      String
+  rowId      String
+  /// Where rawValue came from: CHAIN, FLOAT, PAYMENT_EVENT or BACKFILL.
+  source     String
+  floatValue Float?
+  rawValue   Decimal?  @db.Decimal(39, 0)
+  chainValue Decimal?  @db.Decimal(39, 0)
+  status     String
+  detail     String?
+  /// Whether rawValue was written to the source row.
+  applied    Boolean   @default(false)
+  checkedAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@id([table, rowId])
+  @@map("payment_raw_backfill")
 }
 
 // ─────────────────────────── PRICING SCHEDULE ───────────────────────────

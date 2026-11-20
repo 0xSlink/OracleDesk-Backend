@@ -62,28 +62,30 @@ export const CONSTRAINT_CHECKS: ConstraintCheck[] = [
     violation: '"amount" < 0',
     severity: 'manual',
   },
+  // Payment and allowance money is audited on the exact columns only (#224);
+  // the Float mirrors are dropped by the pending contract migration.
   {
-    name: 'subscriptions_amount_paid_nonneg',
+    name: 'subscriptions_amount_paid_raw_nonneg',
     table: 'subscriptions',
-    violation: '"amountPaid" < 0',
+    violation: '"amountPaidRaw" < 0',
     severity: 'manual',
   },
   {
-    name: 'spending_allowances_daily_limit_nonneg',
+    name: 'spending_allowances_daily_limit_raw_nonneg',
     table: 'spending_allowances',
-    violation: '"dailyLimit" < 0',
+    violation: '"dailyLimitRaw" < 0',
     severity: 'manual',
   },
   {
-    name: 'spending_allowances_per_trace_limit_nonneg',
+    name: 'spending_allowances_per_trace_limit_raw_nonneg',
     table: 'spending_allowances',
-    violation: '"perTraceLimit" < 0',
+    violation: '"perTraceLimitRaw" < 0',
     severity: 'manual',
   },
   {
-    name: 'spending_allowances_spent_today_nonneg',
+    name: 'spending_allowances_spent_today_raw_nonneg',
     table: 'spending_allowances',
-    violation: '"spentToday" < 0',
+    violation: '"spentTodayRaw" < 0',
     severity: 'manual',
   },
   {
