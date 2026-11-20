@@ -91,6 +91,7 @@ the same key on every retry of it.
 | `POST /traces/verify` | optional |
 | `POST /traces/:id/unlock` | optional |
 | `POST /traces/payment-intents/:id/submit` | optional (idempotent by txHash) |
+| `POST /x402/allowance/reserve`, `/commit`, `/release` | **required** (service calls, scope `anon`) |
 | `POST /auth/challenge`, `POST /auth/verify` | not supported (the handshake is single-use, and `/auth/verify` returns a JWT that is never stored) |
 
 - **Format:** 1–255 printable ASCII characters. A UUID (`crypto.randomUUID()`) is recommended.
@@ -676,12 +677,23 @@ Errors: `400 VALIDATION_ERROR`, `402 PAYMENT_NOT_FOUND`,
 The float fields are display mirrors; enforcement uses the raw `NUMERIC(39,0)`
 columns (#53). Response: `SpendingAllowance | null`.
 
+`GET` reports today's figures from the UTC day bucket (#219), not the
+deprecated single-day columns: `spentTodayRaw` / `spentToday` are what was
+booked to today's bucket, plus `dayStart` (ISO, the UTC day reported),
+`reservedRaw` (held by open x402 reservations), `todayOverageRaw` and
+`remainingRaw` (`dailyLimitRaw − spentTodayRaw − reservedRaw`, floored at 0;
+`null` without a daily limit). `overageRaw` stays the lifetime total.
+
 #### `POST /traces/access/preauthorize` (auth)
 
 Advisory-only allowance check (#53). Body
 `{ type?: "DAILY_PASS" | "PER_TRACE", amountRaw?: "base units" }`; for
 `DAILY_PASS` the price defaults to `DAILY_PASS_PRICE_RAW` and for `PER_TRACE`
-`amountRaw` is required. It never writes or reserves budget. Response:
+`amountRaw` is required. It never writes or reserves budget. It checks today's
+UTC bucket (`dayStart`) and counts open x402 reservations (`reservedRaw`)
+against the daily limit as well as spend (#219). The payment itself is charged
+to the UTC day its ledger closes, so a transfer signed at 23:59:58 that closes
+at 00:00:03 is checked against today but booked to tomorrow. Response:
 
 ```json
 {
@@ -690,9 +702,11 @@ Advisory-only allowance check (#53). Body
   "active": true,
   "allowed": false,
   "reason": "ALLOWANCE_DAILY_LIMIT",
+  "dayStart": "2026-11-20T00:00:00.000Z",
   "dailyLimitRaw": "5000000",
   "perTraceLimitRaw": "5000000",
-  "spentTodayRaw": "4000000",
+  "spentTodayRaw": "3000000",
+  "reservedRaw": "1000000",
   "remainingRaw": "1000000",
   "overageRaw": "0",
   "wouldOverflowRaw": "4000000"
@@ -700,8 +714,82 @@ Advisory-only allowance check (#53). Body
 ```
 
 An over-limit payment is still accepted on-chain and flagged
-(`allowanceOverage` on the `PaymentEvent`, `overageRaw` on the allowance); it is
-never refused and never silently dropped.
+(`allowanceOverage` on the `PaymentEvent`, `overageRaw` on the allowance and on
+the day bucket); it is never refused and never silently dropped. Reservations
+never make a pass claim fail: they only reduce the remaining budget, so a claim
+may be flagged as overage instead.
+
+#### x402 allowance reservations (#219, service-to-service)
+
+`POST /x402/allowance/reserve`, `/commit` and `/release` are called by the x402
+trace service (contracts repo) around each per-trace settlement, so per-trace
+purchases are held to the same per-trace and daily limits as passes. They are
+not for browsers.
+
+**Authentication.** HMAC-SHA256 with the shared secret
+`X402_ALLOWANCE_HMAC_SECRET` (32+ characters, loaded through the secret store,
+`_FILE` supported, never `X402_KEY_RELEASE_SECRET`). Every request carries:
+
+| Header | Value |
+|---|---|
+| `X-OracleDesk-Timestamp` | Unix seconds; rejected when more than 60 s from server time |
+| `X-OracleDesk-Signature` | lowercase hex `HMAC-SHA256(secret, METHOD + "\n" + path + "\n" + timestamp + "\n" + hex(SHA-256(body)))` |
+| `Idempotency-Key` | required on all three routes (see Idempotency) |
+
+`path` is the request target exactly as sent, e.g.
+`/api/v1/x402/allowance/reserve` (with any query string); `body` is the exact
+request bytes (hash of the empty string when there is none). A missing, stale
+or wrong signature, or a body changed after signing, is
+`401 SERVICE_AUTH_INVALID`; an unconfigured secret is
+`503 SERVICE_AUTH_NOT_CONFIGURED`. During a secret rotation the previous value
+is accepted for the secret store's grace window.
+
+```ts
+const ts = Math.floor(Date.now() / 1000).toString();
+const body = JSON.stringify(payload);
+const sig = createHmac('sha256', secret)
+  .update(`POST\n${path}\n${ts}\n${createHash('sha256').update(body).digest('hex')}`)
+  .digest('hex');
+```
+
+**`POST /x402/allowance/reserve`** — body
+`{ payer: "G…|M…", subId?: "digits", subIdKind?: "MUXED" | "MEMO", traceId, amountRaw: "base units", nonce }`.
+The payer is resolved to a user by `identityKey` only (the login derivation:
+`G…`, or `G…#muxed:<id>` / `G…#memo:<id>`; an `M…` payer carries its muxed id),
+never by `walletAddress`. Checks `amountRaw` against the per-trace limit and
+against `dailyLimitRaw − spentRaw − reservedRaw` of today's UTC bucket.
+
+| Outcome | Response |
+|---|---|
+| Unknown payer, or no active allowance | `200 { allowed: true, active: false, reservationId: null }` (nothing to enforce; settle normally) |
+| Fits | `201 { allowed: true, active: true, reservationId, dayStart, expiresAt, remainingRaw, replay }`; the amount is held for `X402_ALLOWANCE_RESERVATION_TTL_SECONDS` (default 120) |
+| Over the per-trace limit | `403 ALLOWANCE_PER_TRACE_LIMIT` (`details.perTraceLimitRaw`) |
+| Over the remaining daily budget | `403 ALLOWANCE_DAILY_LIMIT` (`details.dayStart`, `details.remainingRaw`) |
+| Same `(payer, nonce)` again | the same reservation (`replay: true`); with a different amount or trace, `409 ALLOWANCE_NONCE_REUSED` |
+
+Do not settle on a `403`.
+
+**`POST /x402/allowance/commit`** — after settlement, body
+`{ reservationId, txHash: "64-hex", ledgerCloseTime?: unixSeconds | "ISO-8601", amountRaw, payer?, subId?, subIdKind?, traceId? }`.
+Books the settled amount on the UTC day of `ledgerCloseTime` (which may be the
+day after the reservation) and returns the reservation's hold to its own day.
+The money already moved, so a commit is always booked: an expired, released or
+unknown reservation (`late: true`) is charged like a claim, with whatever no
+longer fits the day recorded as overage. An unknown `reservationId` needs
+`payer` to be attributed, otherwise `404 ALLOWANCE_RESERVATION_NOT_FOUND`.
+Without `ledgerCloseTime` the current UTC day is used and `dayInferred: true`.
+Idempotent per `txHash`. Response `200`:
+`{ committed, active, reservationId, chargeId, day: "YYYY-MM-DD", dayInferred, overageRaw, perTraceExceeded, late, replay }`.
+Errors: `409 ALLOWANCE_RESERVATION_COMMITTED` (already committed with another
+`txHash`).
+
+**`POST /x402/allowance/release`** — body `{ reservationId }`, when settlement
+did not happen. Returns `{ reservationId, status, released }`; releasing a
+reservation that is no longer `RESERVED` changes nothing. Errors:
+`404 ALLOWANCE_RESERVATION_NOT_FOUND`.
+
+Reservations not committed or released are expired by the payment-intent cron
+(`PAYMENT_INTENT_CONFIRM_CRON`), which returns their budget.
 
 #### `POST /traces/payment-intents` (auth)
 

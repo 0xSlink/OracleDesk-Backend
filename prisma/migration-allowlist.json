@@ -108,5 +108,14 @@
     ],
     "reason": "limitPriceBps is bounded to 1..10000 by its CHECK and decisionLedger is a Stellar ledger sequence (u32); both match Prisma Int fields.",
     "approvedBy": "pending maintainer review on the PR that adds this migration"
+  },
+  {
+    "migration": "20261120120000_allowance_day_buckets",
+    "rules": [
+      "adding-foreign-key-constraint",
+      "prefer-timestamptz"
+    ],
+    "reason": "allowance_days and allowance_charges are created empty in this same migration, so their users FKs scan nothing and lock no table anyone else writes to; the timestamp columns are TIMESTAMP(3) to match every other Prisma DateTime column (stored as UTC by the client).",
+    "approvedBy": "pending maintainer review on the PR that adds this migration"
   }
 ]
