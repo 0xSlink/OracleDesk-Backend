@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePermission, requireStepUp } from '../middlewares/auth.middleware';
 import {
+  ackAlert,
   ackDispute,
   addOperationSignature,
   cancelDisputeTx,
@@ -10,11 +11,13 @@ import {
   getAdminRoles,
   getAdmins,
   getAgentControls,
+  getAlerts,
   getReconciliationRun,
   getSpecCompat,
   getChainSigningKeys,
   registerChainSigningKey,
   retireChainSigningKey,
+  silenceAlert,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -80,6 +83,11 @@ router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat)
 router.get('/chain/signing-keys', requirePermission('chain.signing_keys'), requireStepUp, getChainSigningKeys);
 router.post('/chain/signing-keys/register', requirePermission('chain.signing_keys'), requireStepUp, registerChainSigningKey);
 router.post('/chain/signing-keys/:publicKey/retire', requirePermission('chain.signing_keys'), requireStepUp, retireChainSigningKey);
+// Operational alerts (#226). Guarded and audited by requirePermission; there is
+// deliberately no unguarded copy of these in the section below.
+router.get('/alerts', requirePermission('admin.read'), getAlerts);
+router.post('/alerts/:id/ack', requirePermission('alerts.manage'), ackAlert);
+router.post('/alerts/:id/silence', requirePermission('alerts.manage'), silenceAlert);
 router.get('/treasury', getTreasury);
 router.get('/treasury/operations', listTreasuryOperations);
 router.post('/treasury/operations', createOperation);

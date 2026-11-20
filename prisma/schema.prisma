@@ -1463,11 +1463,16 @@ model DisputeReview {
 /// One alert sent (or attempted) for a review, deduplicated by `dedupeKey`.
 model AlertDelivery {
   id        String    @id @default(uuid())
-  reviewId  String
+  /// Dispute review (#92). Null for operational alerts (#226).
+  reviewId  String?
+  /// Operational incident (#226). Null for dispute alerts.
+  incidentId String?
+  /// open | escalate | resolve. Dispute rows are all `open`.
+  kind      String    @default("open")
   /// INFO | WARN | CRITICAL
   level     String
   sink      String
-  /// reviewId:level:sink
+  /// Dispute: reviewId:level:sink. Incident: inc:<incidentId>:<episode>:<kind>:<severity>:<sink>.
   dedupeKey String    @unique
   /// SENT | FAILED
   status    String
@@ -1477,6 +1482,55 @@ model AlertDelivery {
 
   @@index([reviewId])
   @@map("alert_deliveries")
+}
+
+/// Operational alert incident (#226): one row per (subjectType, subjectKey),
+/// re-opened as a new episode after it resolves. Hysteresis streaks live here
+/// so any instance can take over evaluation.
+model AlertIncident {
+  id             String    @id @default(uuid())
+  /// agent_pause | outbox_stuck | outbox_unhandled | cron_failing | reconcile_drift
+  subjectType    String
+  /// e.g. TRADER:failure_breaker, outbox:trade.buy, cron:trader, drift:status
+  subjectKey     String
+  /// INFO | WARN | CRITICAL
+  severity       String
+  /// PENDING (bad, below ALERT_OPEN_AFTER) | OPEN | RESOLVED
+  state          String    @default("PENDING")
+  /// Incremented on every open; part of the delivery dedupe key. 0 = never opened.
+  episode        Int       @default(0)
+  summary        String
+  detail         Json?
+  badStreak      Int       @default(0)
+  goodStreak     Int       @default(0)
+  openedAt       DateTime? @db.Timestamptz(3)
+  resolvedAt     DateTime? @db.Timestamptz(3)
+  ackedAt        DateTime? @db.Timestamptz(3)
+  ackedBy        String?
+  silencedUntil  DateTime? @db.Timestamptz(3)
+  lastNotifiedAt DateTime? @db.Timestamptz(3)
+  /// Escalations sent in the current episode.
+  escalations    Int       @default(0)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@unique([subjectType, subjectKey])
+  @@index([state, severity])
+  @@map("alert_incidents")
+}
+
+/// Cluster-wide cron run record (#226), next to the per-instance in-memory
+/// registry, so failure streaks are visible to the alert evaluator.
+model CronRunStatus {
+  job           String    @id
+  lastSuccessAt DateTime? @db.Timestamptz(3)
+  lastFailureAt DateTime? @db.Timestamptz(3)
+  /// Consecutive failures since the last success, across instances.
+  failureStreak Int       @default(0)
+  lastError     String?
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@map("cron_runs")
 }
 
 /// Per-wallet open position for a prediction market outcome (#155).

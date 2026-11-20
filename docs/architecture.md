@@ -519,6 +519,60 @@ indexer ──publish──▶ Redis Stream (oracledesk:events) ──▶ one fa
 
 The indexer and the reconciler (below) both write `markets.chainSyncedLedger`, the ledger a row's chain-derived state reflects. A price or status write applies only when it is not older than that, so the two can never overwrite each other with stale information, and `applyMarketFinality` (`market-finality.ts`) is the one place a market becomes `RESOLVED`/`CANCELLED` and its positions close.
 
+## Operational alerts (#226)
+
+`src/services/alerts.service.ts` serves two payloads through the same sinks
+(HMAC-signed JSON webhook, Slack): dispute alerts (`oracledesk.dispute_alert`,
+byte-for-byte as in #92, keys `reviewId:level:sink`, once per level) and
+operational incidents (`oracledesk.ops_alert`).
+
+**Subjects** (`src/services/ops-alerts/conditions.ts`), all read from Postgres
+so any instance sees the cluster:
+
+| subjectType | subjectKey | Bad when | Severity |
+|---|---|---|---|
+| `agent_pause` | `<scope>:<source>` | a scope's own pause is active | `failure_breaker`, `drawdown` CRITICAL; `chain_paused` WARN; `operator` INFO, off unless `ALERT_OPERATOR_PAUSES` |
+| `outbox_stuck` | `outbox:<kind>` | SUBMITTED/PENDING rows past `maxTime` or older than `ALERT_OUTBOX_STUCK_MS` | CRITICAL past maxTime, else WARN |
+| `outbox_unhandled` | `outbox:<kind>` | terminal rows with `handledAt IS NULL` older than `ALERT_UNHANDLED_MS` | CRITICAL when a SUCCESS row is unhandled, else WARN |
+| `cron_failing` | `cron:<job>` | `cron_runs.failureStreak ≥ ALERT_CRON_FAILURE_STREAK` | WARN; CRITICAL at twice the streak |
+| `reconcile_drift` | `drift:<class>` | the latest finished reconcile run has REPORTED drift of that class | WARN |
+
+Outbox rows are grouped by kind: a backlog of 50 is one incident, never 50.
+`recordCronRun` keeps its in-memory map and also upserts `cron_runs`
+(fire-and-forget, atomic streak increment), so failure streaks are cluster-wide.
+
+**Engine** (`src/services/ops-alerts/engine.ts`). Each tick runs under the
+`ops-alerts` advisory lock; an instance without it returns at once. Incidents
+(`alert_incidents`, unique on `(subjectType, subjectKey)`) move
+PENDING → OPEN after `ALERT_OPEN_AFTER` bad evaluations in a row, and OPEN →
+RESOLVED after `ALERT_RESOLVE_AFTER` good ones, so an operator resume does not
+resolve instantly and a breaker re-pause is absorbed. Each open starts a new
+`episode` and clears the acknowledgement. A subject missing from a successful
+evaluator's output is good; an evaluator that throws leaves its incidents as
+they are. Unacknowledged CRITICAL incidents re-notify (`escalate`, numbered)
+every `ALERT_ESCALATE_EVERY_MS`. `silencedUntil` suppresses every notification,
+and a subject's open is sent at most once per `ALERT_MIN_REOPEN_MS`.
+Notifications are collected in the lock transaction and sent after it commits.
+Their keys `inc:<incidentId>:<episode>:<open|escalate-N|resolve>:<severity>:<sink>`
+in `alert_deliveries` make a retry safe.
+
+**Routing.** `ALERT_ROUTES_JSON` maps severities to sink names: `webhook` matches
+every webhook sink, `slack` the Slack sink, or an exact `webhook-<tag>`. Without
+it, WARN and CRITICAL go to every sink and INFO to none.
+
+**Scheduling.** `startOpsAlertCron()` runs on `ALERT_EVAL_CRON` (every minute) on
+worker roles, is recorded as the `ops-alerts` cron job, and is stopped by the
+shutdown coordinator. It does not depend on the dispute cron. `pauseAgent`
+notifies `onAgentPaused` listeners after commit, and the cron's listener queues
+one debounced (2 s) burst of `ALERT_OPEN_AFTER` evaluations, 2 s apart. The
+hysteresis still needs that many consecutive bad readings, but a breaker trip
+opens its incident within seconds rather than after `ALERT_OPEN_AFTER` cron
+periods. Bursts of pauses (several scopes at once) coalesce into one.
+
+**Admin.** `GET /admin/alerts` (`admin.read`), `POST /admin/alerts/:id/ack` and
+`POST /admin/alerts/:id/silence` (`alerts.manage`, audited by
+`requirePermission`). See docs/api.md.
+
 ## Market lifecycle reconciler (#83)
 
 `market-reconciler.service.ts` runs every ten minutes (`3,13,…,53`, `RECONCILE_ENABLED`) on one instance (a Postgres advisory lock held by a transaction, so a pooled connection cannot leak it). It reads `market_core.get_market` with the ledger the simulation ran against, for linked markets in bounded batches (`RECONCILE_MAX_MARKETS`, `RECONCILE_CONCURRENCY`, `RECONCILE_MAX_RPC_CALLS`; open markets first, then never/least-recently reconciled), and classifies each difference with the pure `classifyDrift`:
@@ -932,60 +986,6 @@ raw titles. `tests/fixtures/injection/*.json` holds 28 attack and 18 benign case
 with recorded model outputs; `tests/llm-injection.test.ts` replays them through
 `generateMarketQuestion` (model replaced by `setLlmJsonCaller`).
 
-## LLM budgets and shared guards (#71)
-
-`src/lib/llm-budget.ts` (state in Redis, atomic Lua in `llm-budget-store.ts`)
-replaces the per-process interval guards and circuit breaker. Every provider
-attempt is `acquire()` → call → `record()`:
-
-- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, capacity =
-  RPM). An empty bucket makes `acquire` wait with jitter for up to 30 s.
-- **Circuit breaker** per provider: `closed → open → half-open`. A daily quota error
-  opens it (Gemini: until at least the next UTC midnight); `LLM_BREAKER_FAILURE_THRESHOLD`
-  consecutive errors open it for `LLM_BREAKER_OPEN_MS`. After that exactly one probe
-  is admitted (its holder has a TTL, so a hung probe cannot block recovery);
-  success closes the breaker, failure reopens it. `LlmCircuitOpen` is `503
-  LLM_CIRCUIT_OPEN`; the router then tries the next provider.
-- **Daily budgets** per UTC day across providers and instances:
-  `LLM_DAILY_TOKEN_BUDGET` and `LLM_DAILY_COST_BUDGET_MICROS`. A call reserves
-  `ceil(chars/4) + maxTokens`; `record()` releases the reservation (also on errors
-  and responses without usage) and adds the real input/output tokens and an
-  estimated cost from `LLM_PRICES` (an estimate; update it when prices change).
-  Crashed calls are reclaimed when their lease TTL passes. Cron work stops at
-  `budget × (1 − LLM_ADMIN_RESERVE_PCT%)`; admin work runs to the full budget.
-  `LlmBudgetExceeded` is `429 LLM_BUDGET_EXCEEDED` and never falls back to another
-  provider (the budget is global). The market cycle logs `LLM_BUDGET_EXCEEDED`
-  once per day (Redis `SET NX`) and returns `null`.
-- **Redis down**: `LLM_REDIS_FAIL_MODE=closed` (recommended) refuses calls with
-  `LLM_CIRCUIT_OPEN` / `GUARD_STORE_UNAVAILABLE`; `open` falls back to a per-process
-  limiter and warns at most once a minute.
-
-Time comes from Redis `TIME` inside the scripts, so clock skew between instances
-does not matter; this is also why budgets reset at UTC midnight, unrelated to
-`checkDailyDrawdown`'s local midnight. The Anthropic client uses `maxRetries: 0` so
-the limiter sees every HTTP attempt. Callers tag calls with a `CallContext`
-(`purpose`: `market_generation`, `trace_hedge`, `admin_generation`; `priority`:
-`cron` or `admin`); `POST /markets/generate` runs as `admin`. `getLlmUsage()` (tokens,
-cost, reserved, breaker states) is part of `GET /admin/status` and logged after each
-cycle.
-
-Tuning: raise `LLM_DAILY_*` for more volume; keep `LLM_ADMIN_RESERVE_PCT` large
-enough that an admin can still trigger a market when cron has stopped; set the RPM
-values at or below the provider's account limits; look for repeated
-`LLM call recorded` lines with `outcome: "error"` before lowering the breaker
-threshold.
-
-## IPFS content store (#100)
-
-`pinJson()` writes the exact pinned bytes to `ipfs_content` (Postgres
-`bytea`) after the pin succeeds; a store failure is logged and does not fail
-the pin. `fetchVerifiedBytes(cid, expectedSha256, verifiedBy)`:
-
-1. reads the local row and re-hashes its bytes;
-2. returns it only when both the stored hash and the freshly computed hash
-   equal the expected hash (on-chain or pin hash);
-3. otherwise consults the gateway, stores bytes only after they verify, and
-   returns unverified bytes without caching so callers can report a mismatch.
 ## Cross-source corroboration (#228)
 
 The injection guard above checks that a proposal cites signals that were really
@@ -1047,6 +1047,60 @@ catches near-copies only. The logged domains let operators find and blocklist
 such pairs. Credibility weighting of publishers is out of scope here and belongs
 to source-weight learning.
 
+## LLM budgets and shared guards (#71)
+
+`src/lib/llm-budget.ts` (state in Redis, atomic Lua in `llm-budget-store.ts`)
+replaces the per-process interval guards and circuit breaker. Every provider
+attempt is `acquire()` → call → `record()`:
+
+- **Token bucket** per provider (`LLM_ANTHROPIC_RPM`, `LLM_GEMINI_RPM`, capacity =
+  RPM). An empty bucket makes `acquire` wait with jitter for up to 30 s.
+- **Circuit breaker** per provider: `closed → open → half-open`. A daily quota error
+  opens it (Gemini: until at least the next UTC midnight); `LLM_BREAKER_FAILURE_THRESHOLD`
+  consecutive errors open it for `LLM_BREAKER_OPEN_MS`. After that exactly one probe
+  is admitted (its holder has a TTL, so a hung probe cannot block recovery);
+  success closes the breaker, failure reopens it. `LlmCircuitOpen` is `503
+  LLM_CIRCUIT_OPEN`; the router then tries the next provider.
+- **Daily budgets** per UTC day across providers and instances:
+  `LLM_DAILY_TOKEN_BUDGET` and `LLM_DAILY_COST_BUDGET_MICROS`. A call reserves
+  `ceil(chars/4) + maxTokens`; `record()` releases the reservation (also on errors
+  and responses without usage) and adds the real input/output tokens and an
+  estimated cost from `LLM_PRICES` (an estimate; update it when prices change).
+  Crashed calls are reclaimed when their lease TTL passes. Cron work stops at
+  `budget × (1 − LLM_ADMIN_RESERVE_PCT%)`; admin work runs to the full budget.
+  `LlmBudgetExceeded` is `429 LLM_BUDGET_EXCEEDED` and never falls back to another
+  provider (the budget is global). The market cycle logs `LLM_BUDGET_EXCEEDED`
+  once per day (Redis `SET NX`) and returns `null`.
+- **Redis down**: `LLM_REDIS_FAIL_MODE=closed` (recommended) refuses calls with
+  `LLM_CIRCUIT_OPEN` / `GUARD_STORE_UNAVAILABLE`; `open` falls back to a per-process
+  limiter and warns at most once a minute.
+
+Time comes from Redis `TIME` inside the scripts, so clock skew between instances
+does not matter; this is also why budgets reset at UTC midnight, unrelated to
+`checkDailyDrawdown`'s local midnight. The Anthropic client uses `maxRetries: 0` so
+the limiter sees every HTTP attempt. Callers tag calls with a `CallContext`
+(`purpose`: `market_generation`, `trace_hedge`, `admin_generation`; `priority`:
+`cron` or `admin`); `POST /markets/generate` runs as `admin`. `getLlmUsage()` (tokens,
+cost, reserved, breaker states) is part of `GET /admin/status` and logged after each
+cycle.
+
+Tuning: raise `LLM_DAILY_*` for more volume; keep `LLM_ADMIN_RESERVE_PCT` large
+enough that an admin can still trigger a market when cron has stopped; set the RPM
+values at or below the provider's account limits; look for repeated
+`LLM call recorded` lines with `outcome: "error"` before lowering the breaker
+threshold.
+
+## IPFS content store (#100)
+
+`pinJson()` writes the exact pinned bytes to `ipfs_content` (Postgres
+`bytea`) after the pin succeeds; a store failure is logged and does not fail
+the pin. `fetchVerifiedBytes(cid, expectedSha256, verifiedBy)`:
+
+1. reads the local row and re-hashes its bytes;
+2. returns it only when both the stored hash and the freshly computed hash
+   equal the expected hash (on-chain or pin hash);
+3. otherwise consults the gateway, stores bytes only after they verify, and
+   returns unverified bytes without caching so callers can report a mismatch.
 
 sha256 is the admission criterion; the CID is only a lookup key. A CID can
 never map to two hashes (`IPFS_CID_HASH_CONFLICT`). Objects above

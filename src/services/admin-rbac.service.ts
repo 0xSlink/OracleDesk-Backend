@@ -25,6 +25,7 @@ export const ADMIN_PERMISSIONS = [
   'refund.prepare',
   'indexer.replay',
   'chain.signing_keys',
+  'alerts.manage',
 ] as const;
 export type AdminPermission = (typeof ADMIN_PERMISSIONS)[number];
 
@@ -42,6 +43,7 @@ const ROLE_PERMISSIONS: Record<AdminRoleName, readonly AdminPermission[]> = {
     'calibration.recompute',
     'refund.request',
     'refund.prepare',
+    'alerts.manage',
   ],
   auditor: [
     'admin.read',

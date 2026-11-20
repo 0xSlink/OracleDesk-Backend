@@ -474,6 +474,38 @@ export const envObjectSchema = z
     // HMAC-SHA256 key for the X-OracleDesk-Signature header on generic webhooks.
     ALERT_WEBHOOK_SECRET: optionalString,
 
+    // ── Operational alerts (#226) ─────────────────────────────────────────
+    // Evaluation schedule (one leader per tick via an advisory lock).
+    ALERT_EVAL_CRON: z.string().default('* * * * *'),
+    // Hysteresis: open after N consecutive bad evaluations, resolve after M good.
+    ALERT_OPEN_AFTER: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(100)),
+    ALERT_RESOLVE_AFTER: z.string().default('3').transform(Number).pipe(z.number().int().min(1).max(100)),
+    // Unacknowledged CRITICAL incidents re-notify this often.
+    ALERT_ESCALATE_EVERY_MS: z.string().default(String(30 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // At most one open notification per subject per this period.
+    ALERT_MIN_REOPEN_MS: z.string().default(String(10 * 60_000)).transform(Number).pipe(z.number().int().min(0)),
+    // Outbox rows in SUBMITTED/PENDING older than this are WARN (past maxTime is CRITICAL).
+    ALERT_OUTBOX_STUCK_MS: z.string().default(String(15 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // Terminal outbox rows whose completion handler has not run after this long.
+    ALERT_UNHANDLED_MS: z.string().default(String(10 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // Consecutive failed runs of one cron job before it alerts.
+    ALERT_CRON_FAILURE_STREAK: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
+    // Operator pauses are INFO and not alerted unless enabled.
+    ALERT_OPERATOR_PAUSES: boolDefault('false'),
+    // Severity → sink names, e.g. {"CRITICAL":["webhook:0","slack"],"WARN":["slack"]}.
+    // Empty = every sink for WARN and CRITICAL, none for INFO.
+    ALERT_ROUTES_JSON: optionalString.refine((v) => {
+      if (v === '') return true;
+      try {
+        const parsed = JSON.parse(v);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          Object.entries(parsed).every(([k, list]) => ['INFO', 'WARN', 'CRITICAL'].includes(k) &&
+            Array.isArray(list) && list.every((n) => typeof n === 'string'));
+      } catch {
+        return false;
+      }
+    }, 'must be a JSON object of INFO|WARN|CRITICAL → sink-name arrays'),
+
     // ── Transaction outbox (#35) ──────────────────────────────────────────
     // Recovery worker interval; it resolves non-terminal chain_transactions.
     OUTBOX_POLL_MS: z.string().default('5000').transform(Number)
@@ -653,6 +685,21 @@ export const envObjectSchema = z
     SIGNAL_RAW_RETENTION_DAYS: z.string().default('7').transform(Number)
       .pipe(z.number().int().min(1).max(365)),
 
+    // ── Cross-source corroboration (#228) ─────────────────────────────────
+    // off: no check. observe: log the verdict and continue. enforce: an
+    // uncorroborated proposal creates nothing (no row, pin, seed or trace).
+    CORROBORATION_MODE: z.enum(['off', 'observe', 'enforce']).default('observe'),
+    // Independent units (clusters merged by domain and rewrite distance) needed.
+    CORROBORATION_MIN_PUBLISHERS: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(20)),
+    // Coverage must be published within this many hours before the cycle.
+    CORROBORATION_WINDOW_HOURS: z.string().default('72').transform(Number).pipe(z.number().int().min(1).max(24 * 30)),
+    // SimHash distance under which two clusters are one rewritten story.
+    CORROBORATION_SIMHASH_REWRITE: z.string().default('10').transform(Number).pipe(z.number().int().min(0).max(64)),
+    // Store rows considered per check, newest first.
+    CORROBORATION_MAX_CANDIDATES: z.string().default('500').transform(Number).pipe(z.number().int().min(1).max(10_000)),
+    // Live mode requires enforce unless this is set.
+    CORROBORATION_ALLOW_OBSERVE_LIVE: boolDefault('false'),
+
     // ── Resilience & Timeouts ─────────────────────────────────────────────
     TIMEOUT_RPC_READ_MS: z.string().default('8000').transform(Number),
     TIMEOUT_RPC_WRITE_MS: z.string().default('45000').transform(Number),
@@ -685,21 +732,6 @@ export const envObjectSchema = z
     TRACE_AUDIT_CRON: z.string().default('40 */2 * * *'),
     TRACE_AUDIT_RECHECK_HOURS: z.string().default('168').transform(Number),
     TRACE_AUDIT_MAX_RPC: z.string().default('500').transform(Number),
-    // ── Cross-source corroboration (#228) ─────────────────────────────────
-    // off: no check. observe: log the verdict and continue. enforce: an
-    // uncorroborated proposal creates nothing (no row, pin, seed or trace).
-    CORROBORATION_MODE: z.enum(['off', 'observe', 'enforce']).default('observe'),
-    // Independent units (clusters merged by domain and rewrite distance) needed.
-    CORROBORATION_MIN_PUBLISHERS: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(20)),
-    // Coverage must be published within this many hours before the cycle.
-    CORROBORATION_WINDOW_HOURS: z.string().default('72').transform(Number).pipe(z.number().int().min(1).max(24 * 30)),
-    // SimHash distance under which two clusters are one rewritten story.
-    CORROBORATION_SIMHASH_REWRITE: z.string().default('10').transform(Number).pipe(z.number().int().min(0).max(64)),
-    // Store rows considered per check, newest first.
-    CORROBORATION_MAX_CANDIDATES: z.string().default('500').transform(Number).pipe(z.number().int().min(1).max(10_000)),
-    // Live mode requires enforce unless this is set.
-    CORROBORATION_ALLOW_OBSERVE_LIVE: boolDefault('false'),
-
     TRACE_AUDIT_MAX_FETCHES: z.string().default('100').transform(Number),
     TRACE_AUDIT_MAX_BYTES: z.string().default('2097152').transform(Number),
 
@@ -737,6 +769,23 @@ export const envObjectSchema = z
       .pipe(z.number().int().min(2)),
     CORRELATION_PRIOR_KAPPA: z.string().default('20').transform(Number)
       .pipe(z.number().positive()),
+
+    // ── Portfolio risk (Issue #280) ───────────────────────────────────────
+    // Monte Carlo paths per run, the largest positions kept, the shrinkage
+    // applied to snapshot correlations, and a soft wall-clock budget.
+    RISK_MC_PATHS: z.string().default('20000').transform(Number)
+      .pipe(z.number().int().min(100)),
+    RISK_MAX_MARKETS: z.string().default('150').transform(Number)
+      .pipe(z.number().int().min(1)),
+    RISK_RHO_SHRINK: z.string().default('0.8').transform(Number)
+      .pipe(z.number().min(0).max(1)),
+    RISK_MAX_DURATION_MS: z.string().default('10000').transform(Number)
+      .pipe(z.number().int().positive()),
+    // Expected-shortfall gate (bps of bankroll); off by default. Exported by the
+    // service, not yet enforced by any caller.
+    RISK_GATE_ENABLED: boolDefault('false'),
+    RISK_MAX_ES_BPS: z.string().default('500').transform(Number)
+      .pipe(z.number().int().min(0).max(10_000)),
 
     // ── Market lifecycle reconciler (Issue #83) ───────────────────────────
     RECONCILE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
@@ -785,23 +834,6 @@ export const envSchema = envObjectSchema
   .superRefine((env, ctx) => {
     // ── Login signing-key rotation (#48) ──
     const currentPublic =
-    // ── Portfolio risk (Issue #280) ───────────────────────────────────────
-    // Monte Carlo paths per run, the largest positions kept, the shrinkage
-    // applied to snapshot correlations, and a soft wall-clock budget.
-    RISK_MC_PATHS: z.string().default('20000').transform(Number)
-      .pipe(z.number().int().min(100)),
-    RISK_MAX_MARKETS: z.string().default('150').transform(Number)
-      .pipe(z.number().int().min(1)),
-    RISK_RHO_SHRINK: z.string().default('0.8').transform(Number)
-      .pipe(z.number().min(0).max(1)),
-    RISK_MAX_DURATION_MS: z.string().default('10000').transform(Number)
-      .pipe(z.number().int().positive()),
-    // Expected-shortfall gate (bps of bankroll); off by default. Exported by the
-    // service, not yet enforced by any caller.
-    RISK_GATE_ENABLED: boolDefault('false'),
-    RISK_MAX_ES_BPS: z.string().default('500').transform(Number)
-      .pipe(z.number().int().min(0).max(10_000)),
-
       env.AUTH_SIGNING_SECRET && StrKey.isValidEd25519SecretSeed(env.AUTH_SIGNING_SECRET)
         ? Keypair.fromSecret(env.AUTH_SIGNING_SECRET).publicKey()
         : null;
@@ -896,6 +928,13 @@ export const envSchema = envObjectSchema
       }
     }
     if (env.CHAIN_EXECUTION_MODE === 'live') {
+      if (env.CORROBORATION_MODE !== 'enforce' && !env.CORROBORATION_ALLOW_OBSERVE_LIVE) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['CORROBORATION_MODE'],
+          message: 'must be enforce when CHAIN_EXECUTION_MODE=live (or set CORROBORATION_ALLOW_OBSERVE_LIVE=true)',
+        });
+      }
       if (!env.AGENT_SECRET_KEY) {
         ctx.addIssue({ code: 'custom', path: ['AGENT_SECRET_KEY'], message: 'is required when CHAIN_EXECUTION_MODE=live' });
       }
@@ -928,13 +967,6 @@ export const envSchema = envObjectSchema
     }
     if (env.URI_REQUEST_SIGNING_SECRET) {
       if (!StrKey.isValidEd25519SecretSeed(env.URI_REQUEST_SIGNING_SECRET)) {
-      if (env.CORROBORATION_MODE !== 'enforce' && !env.CORROBORATION_ALLOW_OBSERVE_LIVE) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['CORROBORATION_MODE'],
-          message: 'must be enforce when CHAIN_EXECUTION_MODE=live (or set CORROBORATION_ALLOW_OBSERVE_LIVE=true)',
-        });
-      }
         ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must be a Stellar secret seed (S…)' });
       }
       if (env.URI_REQUEST_SIGNING_SECRET === env.AUTH_SIGNING_SECRET) {

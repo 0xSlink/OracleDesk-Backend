@@ -27,6 +27,7 @@ import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat
 import { getFeeOracle } from '../services/stellar/fees';
 import { getLlmUsage } from '../lib/llm-budget';
 import { getCronStatus } from '../cron/registry';
+import { MAX_SILENCE_MINUTES, acknowledgeIncident, listIncidents, silenceIncident } from '../services/ops-alerts/incidents';
 import { getReplicationSummary } from '../jobs/ipfs-replication.job';
 import {
   ensureSigningKeyRegistered,
@@ -489,4 +490,42 @@ export async function cancelDisputeTx(req: Request, res: Response): Promise<void
 /** POST /admin/disputes/:id/void-tx — unsigned guardian_void_market. */
 export async function voidDisputeTx(req: Request, res: Response): Promise<void> {
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
+}
+
+// ─── Operational alerts (#226) ───────────────────────────────────────────────
+
+const alertListSchema = z.object({
+  id: z.string().uuid().optional(),
+  state: z.enum(['PENDING', 'OPEN', 'RESOLVED']).optional(),
+  severity: z.enum(['INFO', 'WARN', 'CRITICAL']).optional(),
+});
+const alertIdSchema = z.object({ id: z.string().uuid() });
+const silenceSchema = z.object({ untilMinutes: z.number().int().min(1).max(MAX_SILENCE_MINUTES) }).strict();
+
+function alertId(req: Request): string {
+  const parsed = alertIdSchema.safeParse(req.params);
+  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert id', parsed.error.flatten().fieldErrors as any);
+  return parsed.data.id;
+}
+
+/** GET /admin/alerts?state=&severity=&page=&limit= */
+export async function getAlerts(req: Request, res: Response): Promise<void> {
+  const parsed = alertListSchema.safeParse(req.query);
+  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert filters', parsed.error.flatten().fieldErrors as any);
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const { rows, total } = await listIncidents({ ...parsed.data, skip, take: limit });
+  sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
+}
+
+/** POST /admin/alerts/:id/ack — stops escalation for the current episode. */
+export async function ackAlert(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await acknowledgeIncident(alertId(req), actor(req)));
+}
+
+/** POST /admin/alerts/:id/silence { untilMinutes ≤ 1440 } */
+export async function silenceAlert(req: Request, res: Response): Promise<void> {
+  const id = alertId(req);
+  const body = silenceSchema.safeParse(req.body ?? {});
+  if (!body.success) throw new AppError(400, 'VALIDATION_ERROR', 'untilMinutes must be an integer from 1 to 1440', body.error.flatten().fieldErrors as any);
+  sendSuccess(res, await silenceIncident(id, body.data.untilMinutes));
 }
