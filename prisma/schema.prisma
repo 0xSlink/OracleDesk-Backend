@@ -1714,4 +1714,49 @@ model SourceWeightSet {
   createdAt   DateTime  @default(now()) @db.Timestamptz(3)
 
   @@map("source_weight_sets")
+
+/// One money-audit run (#222): invariants over trades, positions, exits and
+/// outbox rows, read from one REPEATABLE READ snapshot taken at snapshotAt.
+model MoneyAuditRun {
+  id             String    @id @default(uuid())
+  startedAt      DateTime  @default(now()) @db.Timestamptz(3)
+  finishedAt     DateTime? @db.Timestamptz(3)
+  snapshotAt     DateTime  @db.Timestamptz(3)
+  /// Highest ledger a chain read of this run observed.
+  observedLedger Int?
+  checked        Int       @default(0)
+  findings       Int       @default(0)
+  repaired       Int       @default(0)
+  rpcCalls       Int       @default(0)
+  error          String?
+
+  @@map("money_audit_runs")
+}
+
+/// One invariant violation seen by a money-audit run (#222).
+model MoneyAuditFinding {
+  id              String    @id @default(uuid())
+  runId           String
+  /// e.g. TRADE_EXECUTED_WITHOUT_OUTBOX
+  invariant       String
+  /// CRITICAL | HIGH | MEDIUM | INFO
+  severity        String
+  /// trade | position | exit | outbox | market_side | trace
+  subjectType     String
+  subjectId       String
+  evidence        Json
+  suggestedRepair String?
+  /// REPORTED | REPAIRED | SKIPPED_IN_FLIGHT | DEFERRED | ACKED
+  action          String
+  /// sha256(invariant|subjectId|evidence-core): carries a finding across runs.
+  fingerprint     String
+  firstSeenRunId  String
+  ackedBy         String?
+  ackedAt         DateTime? @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([runId])
+  @@index([invariant, createdAt])
+  @@index([fingerprint])
+  @@map("money_audit_findings")
 }

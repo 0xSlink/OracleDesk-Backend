@@ -740,6 +740,19 @@ export const envObjectSchema = z
     RECONCILE_INDEXER_LAG_LEDGERS: z.string().default('20').transform(Number)
       .pipe(z.number().int().min(0)),
 
+    // ── Money audit (Issue #222) ──────────────────────────────────────────
+    MONEY_AUDIT_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+    // Guarded repairs (re-running idempotent handlers); off by default.
+    MONEY_AUDIT_AUTO_REPAIR: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    // A subject updated this recently is in flight, not drift.
+    MONEY_AUDIT_GRACE_MS: z.string().default('120000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    // A PENDING trade with no in-flight outbox row older than this is stuck.
+    MONEY_AUDIT_PENDING_GRACE_MS: z.string().default('3600000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    MONEY_AUDIT_MAX_RPC_CALLS: z.string().default('200').transform(Number)
+      .pipe(z.number().int().min(0)),
+
     // ── Copy Trading (Issue #151) ─────────────────────────────────────────
     COPY_TRADE_TTL_MINUTES: z.string().default('30').transform(Number),
     COPY_TRADE_MAX_PENDING: z.string().default('5').transform(Number),

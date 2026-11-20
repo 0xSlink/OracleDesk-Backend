@@ -4,6 +4,7 @@ import { sendSuccess, parsePagination, buildPaginationMeta } from '../utils/resp
 import {
   controlScopeSchema,
   createOperationSchema,
+  moneyAuditRunSchema,
   pauseAgentSchema,
   reconcileRunSchema,
   recordSchema,
@@ -12,6 +13,7 @@ import {
 } from '../validators/admin.validator';
 import { controlsOverview, pauseAgent, resumeAgent } from '../services/agent-controls.service';
 import { defaultDeps, runReconciliation } from '../services/market-reconciler.service';
+import { runMoneyAudit } from '../services/money-audit/run';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
 import { TraceAuditStatus } from '@prisma/client';
@@ -367,6 +369,61 @@ export async function triggerReconciliationRun(req: Request, res: Response): Pro
     { ...defaultDeps, emit: io ? (e, p) => io.to('admins').emit(e, p) : undefined },
   ).catch((err) => logger.error({ err, runId }, 'Background reconciliation run failed'));
   sendSuccess(res, { runId, message: 'Reconciliation run scheduled' }, 202);
+}
+
+/** GET /admin/money-audit/runs?limit= — money-audit runs (#222), newest first. */
+export async function listMoneyAuditRuns(req: Request, res: Response): Promise<void> {
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
+  sendSuccess(res, await prisma.moneyAuditRun.findMany({ orderBy: { startedAt: 'desc' }, take: limit }));
+}
+
+/** GET /admin/money-audit/runs/:id/findings?severity=&invariant=&page=&limit= */
+export async function listMoneyAuditFindings(req: Request, res: Response): Promise<void> {
+  const id = String(req.params.id);
+  const run = await prisma.moneyAuditRun.findUnique({ where: { id } });
+  if (!run) throw new AppError(404, 'RUN_NOT_FOUND', 'Money audit run not found');
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const where = {
+    runId: id,
+    ...(typeof req.query.severity === 'string' && req.query.severity ? { severity: req.query.severity.toUpperCase() } : {}),
+    ...(typeof req.query.invariant === 'string' && req.query.invariant ? { invariant: req.query.invariant.toUpperCase() } : {}),
+  };
+  const [findings, total] = await Promise.all([
+    prisma.moneyAuditFinding.findMany({ where, orderBy: { createdAt: 'asc' }, skip, take: limit }),
+    prisma.moneyAuditFinding.count({ where }),
+  ]);
+  sendSuccess(res, { run, findings }, 200, buildPaginationMeta(page, limit, total) as any);
+}
+
+/**
+ * POST /admin/money-audit/run
+ * Starts an audit in the background (same advisory lock as the cron) and
+ * returns 202 with its id. A dry run reports but never repairs.
+ */
+export async function triggerMoneyAuditRun(req: Request, res: Response): Promise<void> {
+  const parsed = moneyAuditRunSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid money audit request', parsed.error.flatten().fieldErrors as any);
+  }
+  const runId = uuidv4();
+  runMoneyAudit({ runId, dryRun: parsed.data.dryRun ?? false })
+    .catch((err) => logger.error({ err, runId }, 'Background money audit run failed'));
+  sendSuccess(res, { runId, message: 'Money audit run scheduled' }, 202);
+}
+
+/** POST /admin/money-audit/findings/:id/ack — later runs carry the ack by fingerprint and do not re-alert. */
+export async function ackMoneyAuditFinding(req: Request, res: Response): Promise<void> {
+  const id = String(req.params.id);
+  const finding = await prisma.moneyAuditFinding.findUnique({ where: { id } });
+  if (!finding) throw new AppError(404, 'FINDING_NOT_FOUND', 'Money audit finding not found');
+  if (finding.ackedAt) {
+    sendSuccess(res, finding);
+    return;
+  }
+  sendSuccess(res, await prisma.moneyAuditFinding.update({
+    where: { id },
+    data: { action: 'ACKED', ackedBy: actor(req), ackedAt: new Date() },
+  }));
 }
 
 /**
