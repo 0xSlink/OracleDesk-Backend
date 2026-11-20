@@ -581,14 +581,15 @@ entry for the call that proposed the market.
 | `schema` | Version string of this block. Check it before reading the rest. |
 | `llm[]` | One entry per generation step, in order: the market proposal (creation traces only), then the hedge conditions. |
 | `source` | `llm`: a model produced the output. `default`: a hard-coded safe default was used (`reason` is `LLM_FAILED` or `LLM_BUDGET_EXCEEDED`); such an entry has no model fields. |
-| `provider`, `model` | Who answered. When Gemini served the call, `fallbackFrom` names the provider that failed first. |
+| `provider`, `model` | Who answered: `anthropic`, `gemini` or (since #218) `openai`. When a later policy entry served the call, `fallbackFrom` names the one that failed first. |
 | `promptId`, `promptVersion`, `promptHash` | The registered prompt (`src/lib/prompts`). `promptHash = sha256(canonicalJson({ id, version, system, user }))` over the *template*, not the rendered text. `adhoc`/`0` marks a call that did not use the registry. |
 | `params` | Sampling temperature and the `max_tokens` the serving provider was finally given. |
 | `usage` | Tokens summed over the serving provider's requests; `null` when the SDK reported none. |
 | `latencyMs` | Wall time of the whole call, fallback and repair rounds included. Differs on every run. |
 | `attempts` | Provider requests made, repair rounds and Gemini 429 retries included. |
-| `fallbackFrom` | `{ provider, model, errorClass }`; `errorClass` is one of `validation`, `rate_limited`, `timeout`, `auth`, `circuit_open`, `budget`, `unavailable`, `server_error`, `error`. Provider messages are never recorded. |
-| `outputSha256` | sha256 of the raw model output (canonical JSON of the tool input for Anthropic, the response text for Gemini). Raw prompts and outputs are never stored. |
+| `fallbackFrom` | `{ provider, model, errorClass }`: the first policy entry that was attempted and failed. `errorClass` is one of `validation`, `rate_limited`, `timeout`, `auth`, `circuit_open`, `budget`, `unavailable`, `server_error`, `error`. Provider messages are never recorded. |
+| `route` | Optional (#218): `{ task, chain: [{ provider, model, decision }] }`, the task's policy chain as evaluated, in order. `decision` is `served`, one of the `errorClass` values, `unconfigured` (no key), `cooling` or `open` (skipped by the router's provider health). Absent on older traces. |
+| `outputSha256` | sha256 of the raw model output (canonical JSON of the tool input for Anthropic, the response text for Gemini and OpenAI). Raw prompts and outputs are never stored. |
 | `generator` | The service and its `package.json` version; `commit` appears when `GIT_SHA` is set. |
 
 The block is optional: traces created before #66 have none, and consumers must
