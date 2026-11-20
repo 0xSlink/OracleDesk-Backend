@@ -203,8 +203,13 @@ export async function installFakeAgentsEnv(opts: {
   // Raw SQL on these paths: market-creation claims (dry-run never needs one) and chain_events scans.
   replace(p, '$executeRaw', async () => 0);
   // Advisory locks (the dedup reservation, #283) are uncontended in a single-process test.
-  replace(p, '$queryRaw', async (strings: TemplateStringsArray) =>
-    (Array.isArray(strings) && strings.join('?').includes('pg_try_advisory_xact_lock') ? [{ locked: true }] : []));
+  // applyConfirmedExit re-reads its position FOR UPDATE inside the transaction (#229).
+  replace(p, '$queryRaw', async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = Array.isArray(strings) ? strings.join('?') : '';
+    if (sql.includes('pg_try_advisory_xact_lock')) return [{ locked: true }];
+    if (sql.includes('FROM positions') && sql.includes('FOR UPDATE')) return db.rows('position').filter((r: any) => r.id === values[0]);
+    return [];
+  });
   replace(p, '$queryRawUnsafe', async () => []);
   replace(p, '$transaction', async (arg: any) => (typeof arg === 'function' ? arg(p) : Promise.all(arg)));
 
