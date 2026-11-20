@@ -142,7 +142,8 @@ function unhandledStore(rows: Row[]): Store {
     async create() { throw new Error('unused'); },
     async transition() { return null; },
     async findByAnyHash() { return null; },
-    async findById() { return null; },
+    // recoverInFlight re-reads each row under its lease (#221).
+    async findById(id) { const r = rows.find((x) => x.id === id); return r ? { ...r } : null; },
     async recordBump() { return false; },
     async recordError() {},
   };
