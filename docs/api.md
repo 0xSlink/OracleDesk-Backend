@@ -1077,6 +1077,42 @@ background, under the same advisory lock as the cron (a run that cannot take
 the lock records itself as skipped). Response `202 Accepted`:
 `{ "runId": "uuid", "message": "Reconciliation run scheduled" }`.
 
+#### `GET /admin/money-audit/runs?limit=` (admin, `reconciliation.run`)
+
+Latest money-audit runs (#222), newest first (`limit` ≤ 100, default 20):
+`{ id, startedAt, finishedAt, snapshotAt, observedLedger, checked, findings, repaired, rpcCalls, error }`.
+`findings` counts `REPORTED`, `REPAIRED` and `ACKED` rows; deferred and in-flight rows are not drift.
+
+#### `GET /admin/money-audit/runs/:id/findings?severity=&invariant=&page=&limit=` (admin, `reconciliation.run`)
+
+`{ run, findings }`, with `findings` paginated and optionally filtered by
+`severity` (`CRITICAL`, `HIGH`, `MEDIUM`, `INFO`) and `invariant`. Each finding is
+`{ id, runId, invariant, severity, subjectType, subjectId, evidence, suggestedRepair, action, fingerprint, firstSeenRunId, ackedBy, ackedAt, createdAt }`.
+
+`invariant`: `TRADE_EXECUTED_WITHOUT_OUTBOX`, `POSITION_WITHOUT_EXECUTED_TRADE`,
+`EXECUTED_TRADE_WITHOUT_POSITION`, `OUTBOX_TERMINAL_UNHANDLED`, `TRADE_STUCK_PENDING`,
+`EXIT_CONFIRMED_NOT_LANDED`, `SHARES_MISMATCH`, `SHARES_UNKNOWN_LEGACY`, `TRACE_WITHOUT_TRADE`
+(see [architecture.md](architecture.md#money-audit-222)). `subjectType`: `trade`,
+`position`, `exit`, `outbox`, `market_side` (`subjectId` = `<onChainMarketId>:<YES|NO>`)
+or `trace`. `action`: `REPORTED`, `REPAIRED` (auto-repair on), `SKIPPED_IN_FLIGHT`
+(work in flight; not drift), `DEFERRED` (`SHARES_MISMATCH` waiting for a second
+agreeing run or for the indexer; `evidence.deferReason`) or `ACKED` (the
+fingerprint was acknowledged). Amounts in `evidence` are base-unit decimal strings.
+
+#### `POST /admin/money-audit/run` (admin, `reconciliation.run`)
+
+Body `{ "dryRun"?: boolean }`. Starts a run in the background under the same
+advisory lock as the cron (a run that cannot take the lock records itself as
+skipped). A dry run records findings but never repairs. Response `202 Accepted`:
+`{ "runId": "uuid", "message": "Money audit run scheduled" }`.
+
+#### `POST /admin/money-audit/findings/:id/ack` (admin, `reconciliation.run`, step-up)
+
+Acknowledges a finding: sets `action = ACKED`, `ackedBy` (the admin's wallet) and
+`ackedAt`. Later runs that see the same fingerprint record it as `ACKED` and do
+not alert again. Requires a fresh wallet proof (`403 STEP_UP_REQUIRED` otherwise);
+`404 FINDING_NOT_FOUND` for an unknown id. Acknowledging twice returns the row unchanged.
+
 ### Oracle / resolution
 
 Outcomes are decided on-chain by the `resolver` contract (Reflector price

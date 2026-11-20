@@ -34,6 +34,10 @@ import {
   triggerReconciliationRun,
   triggerTraceAuditRun,
   voidDisputeTx,
+  listMoneyAuditRuns,
+  listMoneyAuditFindings,
+  triggerMoneyAuditRun,
+  ackMoneyAuditFinding,
 } from '../controllers/admin.controller';
 
 const router = Router();
@@ -74,6 +78,11 @@ router.post('/trace-audit/run', requirePermission('trace_audit.run'), triggerTra
 router.get('/reconciliation/runs', requirePermission('reconciliation.run'), listReconciliationRuns);
 router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), getReconciliationRun);
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
+// Money audit (#222): guarded only; acknowledging needs step-up.
+router.get('/money-audit/runs', requirePermission('reconciliation.run'), listMoneyAuditRuns);
+router.get('/money-audit/runs/:id/findings', requirePermission('reconciliation.run'), listMoneyAuditFindings);
+router.post('/money-audit/run', requirePermission('reconciliation.run'), triggerMoneyAuditRun);
+router.post('/money-audit/findings/:id/ack', requirePermission('reconciliation.run'), requireStepUp, ackMoneyAuditFinding);
 // Spec compatibility report from the boot gate (#34): read-only diagnostics.
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
 // Agent trace signing keys (#273): permission- and step-up-guarded only.

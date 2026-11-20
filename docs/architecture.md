@@ -533,6 +533,32 @@ The indexer and the reconciler (below) both write `markets.chainSyncedLedger`, t
 
 Resolution-class findings are deferred while the indexer cursor trails the observation by more than `RECONCILE_INDEXER_LAG_LEDGERS` (the indexer may be about to process the event); after three deferrals in a row they are repaired and flagged `forced`. RPC errors other than `MarketNotFound` are not drift: they are counted and the market is retried first next run. The reference ledger's close time comes from `getLedgers`; if that fails the newest indexed event's time (or the wall clock) stands in. Runs and findings persist in `reconcile_runs` / `market_drift_reports` and are readable through the admin endpoints in [api.md](api.md).
 
+## Money audit (#222)
+
+`services/money-audit/` audits the agent's money records — `Trade`, `Position`, `PositionExit` and `ChainTransaction` rows — against each other and against the treasury's on-chain shares. It is distinct from the market lifecycle reconciler above (#83) and from treasury event reconciliation (#18). `cron/money-audit.cron.ts` runs it hourly at minute 27 (`MONEY_AUDIT_ENABLED`); `runMoneyAudit` takes the `money-audit` advisory lock and opens a `REPEATABLE READ` transaction, so every invariant query sees one snapshot (`snapshotAt` is the transaction time). Chain reads happen after the snapshot, through the reconciler's `pool()`, bounded by `MONEY_AUDIT_MAX_RPC_CALLS` (a candidate left unread is re-checked next run).
+
+| Invariant | Severity | Check | Chain read | Repair |
+| --- | --- | --- | --- | --- |
+| `TRADE_EXECUTED_WITHOUT_OUTBOX` | HIGH | `EXECUTED` trade with `txHash` and no `trade.buy` `SUCCESS` row (matched by `refId`, inner hash, landed hash or bump hash) | `getTransaction(txHash)` only when no row exists | — |
+| `POSITION_WITHOUT_EXECUTED_TRADE` | CRITICAL | position whose trade is not `EXECUTED` | — | — |
+| `EXECUTED_TRADE_WITHOUT_POSITION` | HIGH | `EXECUTED` trade with no position (live mode only) | — | `applyBuySuccess` from the `SUCCESS` row |
+| `OUTBOX_TERMINAL_UNHANDLED` | HIGH | domain-kind row in `SUCCESS`/`FAILED`/`EXPIRED`, `handledAt` null, older than the grace | — | `runCompletionHandler` |
+| `TRADE_STUCK_PENDING` | MEDIUM | `PENDING` trade older than `MONEY_AUDIT_PENDING_GRACE_MS` with no non-terminal outbox row | — | — |
+| `EXIT_CONFIRMED_NOT_LANDED` | CRITICAL | `CONFIRMED` live exit with `txHash` and no `trade.sell` `SUCCESS` row | `getTransaction(txHash)`; a landed sale clears it | — |
+| `SHARES_MISMATCH` | CRITICAL (chain < DB) / HIGH (chain > DB) | Σ `sharesRaw` per (on-chain market, side) vs `get_position(market, treasury)` | `getPositionWithLedger` | — |
+| `SHARES_UNKNOWN_LEGACY` | INFO | a side has a pre-#78 position with `sharesRaw` null: not compared | — | — |
+| `TRACE_WITHOUT_TRADE` | MEDIUM | `CONFIRMED` `buy_yes`/`buy_no` publication whose market has no `EXECUTED` trade on that side created before the publication | — | — |
+
+**Expected shares.** Shares leave the treasury only through a confirmed `agent_sell`, which lowers the position's `sharesRaw` to what is left. Closes that sell nothing — `applyMarketFinality` (resolution/void) and `closePosition` — leave the shares on chain, and redeem is never called, so the expected balance is Σ `sharesRaw` over every position on the side whatever its status: open, finality-closed, and exit-closed positions counted only by the shares the exits did not sell.
+
+**In flight.** A subject is recorded `SKIPPED_IN_FLIGHT` (never drift, never repaired, never read from chain) when a `chain_transactions` row for one of its domain ids is `BUILT`/`SIGNED`/`SUBMITTED`/`PENDING`, an exit on it is `SUBMITTED`, or one of its rows was updated within `MONEY_AUDIT_GRACE_MS` (default 120 s).
+
+**Ledger consistency.** `chain.service.getPositionWithLedger` returns the balance with the simulation's `latestLedger` (it throws when there is none; overridable through `setChainOverrides`). A mismatch is `DEFERRED` when treasury `Trade` events for that market were indexed in (cursor at snapshot, observed ledger], or when the indexer cursor trails the observation by more than `RECONCILE_INDEXER_LAG_LEDGERS`; after `MAX_CONSECUTIVE_DEFERRALS` such deferrals in a row it is reported with `evidence.forced = true`. Otherwise it is reported only when the previous run saw the same side with the same database and chain numbers (the same fingerprint); the first sighting is `DEFERRED` with `deferReason: UNCONFIRMED`.
+
+**Repairs** run only with `MONEY_AUDIT_AUTO_REPAIR=true` on a non-dry run, and only re-run the existing idempotent functions after re-reading the row outside the snapshot and confirming it is still eligible and not in flight. A repair that declines is recorded `REPORTED` with `evidence.repair = "SKIPPED"`.
+
+**Fingerprints and alerts.** `fingerprint = sha256(invariant | subjectId | evidence-core)` carries a finding across runs (`firstSeenRunId`). A finding whose fingerprint was acknowledged is recorded `ACKED` and not re-alerted. A `CRITICAL` finding is sent once per new fingerprint to the `sinksFromConfig()` alert sinks (level `CRITICAL`) and logged as a `MONEY_AUDIT_FINDING` agent log (`TRADER`, `ERROR`). Runs and findings persist in `money_audit_runs` / `money_audit_findings`; the admin endpoints are in [api.md](api.md).
+
 ## Market correlations (#80)
 
 The trader caps correlated exposure before opening a position (5% of the bankroll, pairs with |ρ| ≥ 0.60). The correlation behind that comes from `CorrelationSnapshot`, recomputed by the monitor cron at `2,17,32,47` (just before the trader) by `computeCorrelationSnapshot`; the trading path only reads the latest snapshot (cached five minutes) and never computes inline.
