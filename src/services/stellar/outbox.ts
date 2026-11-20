@@ -201,15 +201,71 @@ export async function runCompletionHandler(
   store: OutboxStore = prismaOutboxStore(),
 ): Promise<void> {
   if (row.handledAt) return;
-  const handler = handlers.get(row.kind);
-  if (!handler && DOMAIN_KINDS.has(row.kind)) {
-    // The owning module has not loaded (or failed to): leaving the row
-    // unhandled keeps it visible to the next recovery pass instead of
-    // silently dropping the domain update.
-    throw new Error(`no completion handler registered for ${row.kind}`);
+  await trackHandlerRun(row.kind, async () => {
+    const handler = handlers.get(row.kind);
+    if (!handler && DOMAIN_KINDS.has(row.kind)) {
+      // The owning module has not loaded (or failed to): leaving the row
+      // unhandled keeps it visible to the next recovery pass instead of
+      // silently dropping the domain update.
+      throw new Error(`no completion handler registered for ${row.kind}`);
+    }
+    if (handler) await handler(row, outcome);
+    await store.markHandled(row.id);
+  });
+}
+
+// ─── Handler failure streaks (#220) ──────────────────────────────────────────
+
+export interface HandlerStreak {
+  /** Consecutive failed runs for this kind since the last success. */
+  count: number;
+  /** Error class only (name/code): messages can carry XDR. */
+  lastErrorClass: string | null;
+  /** When the current streak started (ISO), null when count is 0. */
+  since: string | null;
+}
+
+const handlerStreaks = new Map<string, HandlerStreak>();
+
+function errorClass(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code)) return code;
+    if (/^no completion handler registered/.test(err.message)) return 'missing_handler';
+    return err.name || 'Error';
   }
-  if (handler) await handler(row, outcome);
-  await store.markHandled(row.id);
+  return typeof err;
+}
+
+/**
+ * Runs one completion-handler attempt and records it in the per-kind streak:
+ * reset on success, incremented on throw (the error is rethrown unchanged).
+ * Wraps every runCompletionHandler call site at once, so recovery, bump and
+ * inline paths all feed the same streak. Per instance, not cluster-wide.
+ */
+async function trackHandlerRun(kind: string, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    const prev = handlerStreaks.get(kind);
+    handlerStreaks.set(kind, {
+      count: (prev?.count ?? 0) + 1,
+      lastErrorClass: errorClass(err),
+      since: prev && prev.count > 0 ? prev.since : new Date().toISOString(),
+    });
+    throw err;
+  }
+  if (handlerStreaks.get(kind)?.count) handlerStreaks.set(kind, { count: 0, lastErrorClass: null, since: null });
+}
+
+/** Per-kind completion-handler failure streaks on this instance (#220). */
+export function handlerHealth(): { scope: 'instance'; kinds: Record<string, HandlerStreak> } {
+  return { scope: 'instance', kinds: Object.fromEntries([...handlerStreaks].map(([k, v]) => [k, { ...v }])) };
+}
+
+/** Visible for tests: forget handler streaks. */
+export function clearHandlerStreaksForTest(): void {
+  handlerStreaks.clear();
 }
 
 /** Visible for tests: forget registered handlers. */
@@ -644,6 +700,13 @@ async function loadCompletionHandlers(): Promise<void> {
   ]);
 }
 
+let workerRunning = false;
+
+/** True between startOutboxWorker() and its stop function (#220 chain-writer detection). */
+export function outboxWorkerRunning(): boolean {
+  return workerRunning;
+}
+
 /**
  * Starts the recovery worker: one pass immediately (resolving whatever a
  * previous process left in flight), then every OUTBOX_POLL_MS. Returns a stop
@@ -670,9 +733,11 @@ export function startOutboxWorker(deps: RecoverDeps = {}): () => void {
     if (!stopped) timer = setTimeout(tick, config.OUTBOX_POLL_MS);
   };
   void tick();
+  workerRunning = true;
   logger.info({ pollMs: config.OUTBOX_POLL_MS }, 'outbox recovery worker started');
   return () => {
     stopped = true;
+    workerRunning = false;
     if (timer) clearTimeout(timer);
   };
 }
