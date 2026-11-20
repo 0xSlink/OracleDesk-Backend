@@ -1743,6 +1743,7 @@ model SourceWeightSet {
   createdAt   DateTime  @default(now()) @db.Timestamptz(3)
 
   @@map("source_weight_sets")
+}
 
 /// One money-audit run (#222): invariants over trades, positions, exits and
 /// outbox rows, read from one REPEATABLE READ snapshot taken at snapshotAt.
