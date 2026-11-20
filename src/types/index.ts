@@ -55,6 +55,14 @@ export interface AggregatedSignals {
   macro: AggregatedSignal[];
   aggregatedAt: Date;
   signalCount: number;
+  /** The source weight set the relevance scores were computed with (#223); version 0 = compiled table. */
+  weightSet?: SourceWeightSetRef;
+}
+
+/** Identifies a source weight set (#223); `{ id: null, version: 0 }` is the compiled SOURCE_WEIGHTS. */
+export interface SourceWeightSetRef {
+  id: string | null;
+  version: number;
 }
 
 // ─── Market generation types ───
@@ -213,6 +221,8 @@ export interface TraceInput {
   forecast?: Record<string, unknown>;
   /** Treasury-aware sizing: Kelly/correlation/final sizes, binding constraint, budget snapshot (#76). */
   sizing?: Record<string, unknown>;
+  /** Weight set behind the evidence's relevance scores (#223). */
+  sourceWeightSet?: SourceWeightSetRef;
 }
 
 export interface TraceVerification {

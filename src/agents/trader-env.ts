@@ -34,6 +34,7 @@ import type {
   CorrelationCheckResult,
   EnsembleForecast,
   HedgeRecommendation,
+  SourceWeightSetRef,
   WeightedSignal,
 } from '../types';
 
@@ -82,6 +83,8 @@ export interface Forecast {
   sources: WeightedSignal[];
   /** Per-model forecasts, weights and input digests (#75), pinned in the trace. */
   ensemble?: EnsembleForecast;
+  /** Weight set of the aggregation the forecast's signals came from (#223). */
+  weightSet?: SourceWeightSetRef;
 }
 
 export interface BuyOrder {
@@ -213,6 +216,7 @@ export function prodTraderEnv(): TraderEnv {
         ci: result.forecast.ci,
         sources: evidenceFromSignals(result.relevant),
         ensemble: result.forecast,
+        weightSet: signals.weightSet,
       };
     },
 
@@ -257,6 +261,7 @@ export function prodTraderEnv(): TraderEnv {
         betFraction:         order.kelly,
         betSizeUsdc:         order.amount,
         sizing:              order.sizing as unknown as Record<string, unknown>,
+        sourceWeightSet:     order.forecast.weightSet,
         correlation: {
           pairs:      order.correlation.correlatedPairs,
           method:     order.correlation.method ?? 'matrix',

@@ -485,6 +485,8 @@ model ReasoningTrace {
   previewSources      Json?             // First 2 sources (free preview)
   lastAuditStatus     TraceAuditStatus?
   lastAuditedAt       DateTime?
+  /// Source weight set version the evidence was scored with (#223); null = before #223 (v0).
+  sourceWeightSetVersion Int?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -1689,4 +1691,27 @@ model IpfsPin {
 
   @@id([cid, provider])
   @@map("ipfs_pins")
+}
+
+/// Learned signal source/publisher weights (#223). DRAFT → APPROVED → ACTIVE →
+/// RETIRED; at most one ACTIVE row (raw-SQL partial unique index
+/// source_weight_sets_active_key). Written by `npm run weights:estimate -- --save`.
+model SourceWeightSet {
+  id          String    @id @default(uuid())
+  version     Int       @unique
+  /// DRAFT | APPROVED | ACTIVE | RETIRED
+  status      String    @default("DRAFT")
+  /// { "source:NEWSAPI": 0.64, "publisher:reuters.com": 0.81 }
+  weights     Json
+  /// { key: { lower, upper, nEff, nMarkets, insufficient, ... } }
+  intervals   Json
+  /// { priorSd, window, cutoff, inputDigest, heldOutDeltaLogLoss, regression, ... }
+  method      Json
+  parentId    String?
+  createdBy   String
+  approvedBy  String?
+  activatedAt DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@map("source_weight_sets")
 }

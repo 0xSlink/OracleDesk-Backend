@@ -751,7 +751,8 @@ traces written before resolution and stores metrics per slice.
 
 Query (all optional): `window` (`30d`, `90d`, `all`; default `90d`),
 `groupBy` (`agentType`, `category`, `decisionType`, `promptVersion`, `model`,
-`agentType_category`; default `agentType`), `agentType` (`MARKET_MAKER` or
+`agentType_category`, `sourceWeightSet` (keys `v0`, `v1`, …; v0 = compiled
+weights, #223); default `agentType`), `agentType` (`MARKET_MAKER` or
 `TRADER`) and `category`. The two filters only apply to the groupings that
 contain them (`agentType`, `category`, `agentType_category`); otherwise `400
 VALIDATION_ERROR`. The response carries `Cache-Control: public, max-age=300`.
@@ -1672,6 +1673,45 @@ Permission `markets.generate` + step-up. Body: `{ reason? }`. Allowed while the 
 
 #### `POST /admin/generation-runs/:id/retry`
 Permission `markets.generate` + step-up. Resets a `NEEDS_ATTENTION` run to `lastError.step` with `attempts = 0` and resumes it in the background. 202 with the run. 400 `RUN_NOT_RETRYABLE` for any other state.
+
+## Source Weight Sets (auth, admin, #223)
+
+Learned signal source/publisher weights; see docs/architecture.md ("Learned
+source weights"). Sets are created by `npm run weights:estimate -- --save`.
+A set: `{ id, version, status: DRAFT|APPROVED|ACTIVE|RETIRED, weights:
+{ "source:NEWSAPI": 0.64, "publisher:reuters": 0.81 }, intervals: { key:
+{ lower, upper, nEff, nMarkets, insufficient, current, beta, betaSd } },
+method: { priorSd, window, cutoff, inputDigest, heldOutDeltaLogLoss,
+regression, heldOut, fit, counts, notes, … }, parentId, createdBy,
+approvedBy, activatedAt, createdAt }`. The approve, activate and rollback
+endpoints write their own `admin_audit_logs` row in the same transaction.
+
+#### `GET /admin/source-weights`
+Permission `admin.read`. Every set, newest version first.
+
+#### `GET /admin/source-weights/:id`
+Permission `admin.read`. `{ set, active: { id, version }, diff: [{ key, from, to, delta }] }`;
+`active` is `{ id: null, version: 0 }` (the compiled table) when no set is active, and
+`diff` compares its weights with this set's. 404 `WEIGHT_SET_NOT_FOUND`.
+
+#### `POST /admin/source-weights/:id/approve`
+Permission `agents.weights.approve` (super_admin only) + step-up. DRAFT → APPROVED.
+403 `SELF_APPROVAL` when the caller created the set; 409 `WEIGHT_SET_REGRESSION`
+when `method.regression` is true (worse than its parent on held-out log loss);
+409 `WEIGHT_SET_NOT_DRAFT`.
+
+#### `POST /admin/source-weights/:id/activate`
+Permission `agents.weights.approve` + step-up. In one transaction: the ACTIVE set
+becomes RETIRED, this APPROVED set becomes ACTIVE (`activatedAt` = now), audit row
+`SOURCE_WEIGHTS_ACTIVATED`. Aggregations already running keep their table; new
+ones pick it up within 60 s. 409 `WEIGHT_SET_NOT_APPROVED`.
+
+#### `POST /admin/source-weights/rollback`
+Permission `agents.weights.approve` + step-up. Retires the ACTIVE set and
+reactivates the RETIRED set with the latest `activatedAt` before it (repeated
+rollbacks walk further back); with none, the compiled table applies again.
+Response `{ retired: { id, version }, active: { id, version } }`. 409
+`NO_ACTIVE_WEIGHT_SET`.
 
 ---
 

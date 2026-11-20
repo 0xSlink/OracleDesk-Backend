@@ -124,4 +124,19 @@ router.post('/generation-runs', requirePermission('markets.generate'), requireSt
 router.post('/generation-runs/:id/cancel', requirePermission('markets.generate'), requireStepUp, cancelGenerationRun);
 router.post('/generation-runs/:id/retry', requirePermission('markets.generate'), requireStepUp, retryGenerationRun);
 
+// Learned source weight sets (#223). The service writes its own audit row in
+// the same transaction as each change, so these opt out of the request audit.
+import {
+  activateSourceWeightSet,
+  approveSourceWeightSet,
+  getSourceWeightSet,
+  listSourceWeightSets,
+  rollbackSourceWeightSet,
+} from '../controllers/admin.controller';
+router.get('/source-weights', requirePermission('admin.read'), listSourceWeightSets);
+router.post('/source-weights/rollback', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, rollbackSourceWeightSet);
+router.get('/source-weights/:id', requirePermission('admin.read'), getSourceWeightSet);
+router.post('/source-weights/:id/approve', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, approveSourceWeightSet);
+router.post('/source-weights/:id/activate', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, activateSourceWeightSet);
+
 export default router;

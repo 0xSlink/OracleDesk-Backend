@@ -549,6 +549,8 @@ export const envObjectSchema = z
     // largest log-odds intercept a fitted map may apply.
     RECALIBRATION_PRIOR_STRENGTH: z.string().default('20').transform(Number).pipe(z.number().positive()),
     RECALIBRATION_MAX_INTERCEPT: z.string().default('0.5').transform(Number).pipe(z.number().min(0).max(2)),
+    // #223 learned source weights: a key fitted on fewer effective samples keeps its parent weight.
+    WEIGHTS_MIN_NEFF: z.string().default('30').transform(Number).pipe(z.number().positive()),
 
     // Build commit, recorded in trace provenance (#66). Set by CI/deploy.
     GIT_SHA: optionalString,

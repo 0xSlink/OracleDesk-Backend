@@ -319,7 +319,7 @@ relevanceScore = sourceWeight × recencyDecay × log2(1 + clusterSize)
 recencyDecay   = 0.5 ^ (ageHours / 12)
 ```
 
-`sourceWeight` is `SOURCE_WEIGHTS` (NEWSAPI 0.7, GDELT 0.6, FRED 0.9). Age is measured from `publishedAt`, except for FRED, whose observation date is the start of the reporting period: it ages from `lastSeenAt`. Syndication raises a story's score only logarithmically.
+`sourceWeight` is the active learned weight set when one is active (publisher weight, then source weight, then 0.5; see "Learned source weights (#223)"), otherwise `SOURCE_WEIGHTS` (NEWSAPI 0.7, GDELT 0.6, FRED 0.9). Age is measured from `publishedAt`, except for FRED, whose observation date is the start of the reporting period: it ages from `lastSeenAt`. Syndication raises a story's score only logarithmically.
 
 **Traces.** `sourcesUsed` entries carry `signalId`, `url`, `publisher` and `publishedAt` (built by `evidenceFromSignals`), and their `weight` is the relevance score instead of a constant. The market maker records the signals its proposal cited in `grounding_signal_ids`. The free `previewSources` keep only `{source, publisher, signal}`. Traces written before #73 have no `signalId`; readers treat these fields as optional, and pinned payloads are never rewritten.
 
@@ -835,6 +835,77 @@ policy and the exclusions are in `docs/api.md` ("Agent calibration").
   forecast cache key, so a refit invalidates cached forecasts.
 - **API.** `GET /agents/calibration?include=maps` adds the active maps.
 
+
+## Learned source weights (#223)
+
+`src/services/source-weights.service.ts` replaces the hand-written
+`SOURCE_WEIGHTS` with versioned, outcome-fitted weight sets, behind a second
+admin's approval. `ALLOWED_ORACLES` and the dedup entity list still derive
+from the compiled table and do not change.
+
+- **Samples.** `extractRows()`'s filters (resolved, non-void, on-chain
+  markets; traces strictly before resolution) joined to
+  `trace_publications.payload.forecast.members[llm:*].detail` (`baseRate`,
+  `adjustments[].signalId/delta`) and to `signals` (`source`, `publisher`,
+  `clusterId`). Traces without adjustments (pre-#75, `MARKET_CREATION`) are
+  skipped; adjustments whose `signalId` is null or no longer in the store are
+  dropped. Both are counted in `method.counts`. Each market's weight of 1 is
+  split over its traces with the calibration `'time'` scheme
+  (`marketTraceWeights`).
+- **Model.** Penalised logistic regression with hierarchical shrinkage:
+  `logit P(o=1) = α_category + γ_version + logit(baseRate) + Σ_k β_k x_k`,
+  `x_k = Σ_{adjustments of key k} [logit(clampP(base + δ)) − logit(base)]`.
+  Priors: `β_source ~ N(1, τ_s²)`, `β_publisher = β_source + u`,
+  `u ~ N(0, τ_p²)` (τ = 0.5 by default), `α, γ ~ N(0, 1)`. β = 1 means the
+  forecaster used the signal at the right strength, 0 that it is noise, > 1
+  that it is under-weighted.
+- **Assumptions and their guards.** Sources are not assigned to topics at
+  random (FRED only appears on FED/MACRO questions), so `α_category` absorbs
+  each category's base rate; a naive per-source hit rate would credit FRED
+  with it. Evidence sets overlap: adjustments sharing a `clusterId` are
+  averaged into one contribution (FRED rows are cluster size 1). Data scored
+  under different weight sets is not exchangeable, so traces are pooled only
+  with a per-version fixed effect `γ_version` (from
+  `reasoning_traces.sourceWeightSetVersion`, null = v0). With
+  `FORECAST_LLM_SAMPLES > 1` only the first sample's adjustments are recorded,
+  so the fit sees one sample per trace. `base + δ` is clamped to
+  `[0.02, 0.98]` before logits.
+- **Fit.** MAP by Newton/IRLS (≤ 50 iterations, step halving, tolerance
+  `1e-10` on the largest step), dense Cholesky on a (categories + versions +
+  keys)-sized Hessian; 90 % intervals from its inverse (Laplace). Proposed
+  `w_k = clamp(w_parent_k · β̂_k, 0.05, 1)`; a new publisher's parent weight
+  is its source's. Keys with `nEff < WEIGHTS_MIN_NEFF` (default 30) keep the
+  parent weight and are flagged `insufficient` (an insufficient new
+  publisher gets no key, so it follows its source). Inputs are sorted by
+  `(marketId, traceId, signalId)` and `inputDigest = sha256(canonicalJson(samples))`,
+  so the output is deterministic.
+- **Held out.** `npm run weights:estimate -- --window 180d [--cutoff …] [--save --created-by G…]`
+  fits on markets resolved before the cutoff (default: the last fifth of the
+  window) and scores the rest: log loss with the fitted fixed effects and the
+  parent's weights versus the proposed ones. A set worse than its parent is
+  saved with `method.regression: true` and cannot be approved. The CLI prints
+  key, current and proposed weight, 90 % interval, nEff, nMarkets, and the
+  ranking change on the latest 24 h aggregation.
+- **Lifecycle.** `source_weight_sets` rows go DRAFT → APPROVED → ACTIVE →
+  RETIRED. Approval needs `agents.weights.approve` (super_admin only),
+  step-up, and an admin other than `createdBy`. Activation and rollback each
+  run in one transaction under an advisory lock (retire the old set, activate
+  the new one, write an `admin_audit_logs` row); a partial unique index
+  (`WHERE status = 'ACTIVE'`) guarantees one ACTIVE row. Rollback reactivates
+  the RETIRED set with the latest `activatedAt` before the current one, or
+  falls back to the compiled table.
+- **Runtime.** `getActiveWeightTable()` caches the ACTIVE row for 60 s and
+  falls back to `SOURCE_WEIGHTS` as `{ id: null, version: 0 }`.
+  `aggregateSignals()` loads it once and stamps `weightSet: { id, version }`
+  on its result, so one cycle never mixes tables and an activation does not
+  affect a cycle already running. `sourceWeight(source, publisher?, table?)`
+  and `relevanceScore(…, table?, publisher?)` take the table explicitly;
+  without one they behave exactly as before.
+- **Stamping.** Traces carry `sourceWeightSet: { id, version }` in the pinned
+  document and `reasoning_traces.sourceWeightSetVersion`; calibration can
+  group by `sourceWeightSet` (`v0` for older traces).
+- **Not learned.** `RECENCY_HALF_LIFE_HOURS`, cluster weighting and ensemble
+  recalibration stay as they are; there is no online learning.
 
 ## Evaluating market generation (#67)
 

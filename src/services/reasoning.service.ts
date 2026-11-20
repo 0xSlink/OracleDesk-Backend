@@ -69,6 +69,8 @@ export async function generateReasoningTrace(
     seedPolicy:          input.seedPolicy,
     forecast:            input.forecast,
     sizing:              input.sizing,
+    // #223: which source weight set scored the evidence; absent on older traces.
+    sourceWeightSet:     input.sourceWeightSet,
     hedgeConditions:     hedgeConditions.conditions,
     provenance,
     agentWallet:         input.agentWallet,
@@ -101,6 +103,7 @@ export async function generateReasoningTrace(
       hedgeConditions:     hedgeConditions.conditions as any,
       provenance:          provenance as unknown as Prisma.InputJsonValue,
       agentWallet:         input.agentWallet,
+      sourceWeightSetVersion: input.sourceWeightSet?.version ?? null,
       previewSources:      previewSources as any,
       verified:            false,
       isPublic:            false,

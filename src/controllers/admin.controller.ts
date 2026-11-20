@@ -34,6 +34,7 @@ import {
   signingKeyStatus,
 } from '../services/agent-signing-key.service';
 import { AppError } from '../middlewares/error.middleware';
+import * as sourceWeights from '../services/source-weights.service';
 import {
   ADMIN_ROLES,
   grantAdminRole,
@@ -489,4 +490,37 @@ export async function cancelDisputeTx(req: Request, res: Response): Promise<void
 /** POST /admin/disputes/:id/void-tx — unsigned guardian_void_market. */
 export async function voidDisputeTx(req: Request, res: Response): Promise<void> {
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
+}
+
+// ─── Learned source weights (#223) ───────────────────────────────────────────
+
+function weightSetId(req: Request): string {
+  const id = String(req.params.id ?? '').trim();
+  if (!id || id.length > 64) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid weight set id');
+  return id;
+}
+
+/** GET /admin/source-weights — every set, newest version first. */
+export async function listSourceWeightSets(_req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.listWeightSets());
+}
+
+/** GET /admin/source-weights/:id — the set and its per-key diff against the active set. */
+export async function getSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.getWeightSetWithDiff(weightSetId(req)));
+}
+
+/** POST /admin/source-weights/:id/approve — a second admin approves a DRAFT (step-up). */
+export async function approveSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.approveWeightSet(weightSetId(req), actor(req)));
+}
+
+/** POST /admin/source-weights/:id/activate — retire the active set, activate this one (step-up). */
+export async function activateSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.activateWeightSet(weightSetId(req), actor(req)));
+}
+
+/** POST /admin/source-weights/rollback — reactivate the previously active set (step-up). */
+export async function rollbackSourceWeightSet(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await sourceWeights.rollbackWeightSet(actor(req)));
 }
