@@ -6,6 +6,7 @@ import { hedgeConditionsV1 } from '../lib/prompts';
 import { buildTraceProvenance, type ProvenanceEntry } from '../lib/llm/provenance';
 import { renderUntrustedBlock, sanitizeSignal } from './llm-guard.service';
 import { logger } from '../lib/logger';
+import crypto from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import type {
   AggregatedSignal,
@@ -51,15 +52,15 @@ export async function generateReasoningTrace(
   // canonicalJson would encode differently from the contracts repo.
   const provenance = buildTraceProvenance([...(opts.upstreamProvenance ?? []), hedgeConditions.provenance]);
 
-  const traceDoc: TraceDocV1 = buildTraceDoc({
+  const traceId = crypto.randomUUID();
+  const tracePayload: Record<string, unknown> = {
     traceId,
-    agentType: input.agentType,
-    decisionType: input.decisionType,
-    action: input.decisionType.toLowerCase(),
-    backendMarketId: input.marketId,
-    onChainMarketId,
+    agentType:           input.agentType,
+    decisionType:        input.decisionType,
+    marketId:            input.marketId,
+    sourcesUsed:         input.sourcesUsed,
     probabilityEstimate: input.probabilityEstimate,
-    marketProbability: input.marketProbability,
+    marketProbability:   input.marketProbability,
     edge,
     confidenceInterval:  ci,
     betFraction:         input.betFraction,
@@ -108,7 +109,7 @@ export async function generateReasoningTrace(
   });
 
   logger.info({ traceId: trace.id, edge, marketId: input.marketId }, 'Reasoning trace generated');
-  return { trace, tracePayload: traceDoc };
+  return { trace, tracePayload };
 }
 
 /**

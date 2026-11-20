@@ -1512,6 +1512,8 @@ model WalletPnlDirtyMarket {
   reason          String?
 
   @@map("wallet_pnl_dirty_markets")
+}
+
 /// Short-lived exclusive hold on a question that prevents concurrent cycles
 /// from creating duplicate markets. Rows are HELD until the market is inserted
 /// (then COMMITTED), or released on skip/abort/failure.
@@ -1548,6 +1550,8 @@ model PortfolioRiskSnapshot {
 
   @@index([computedAt])
   @@map("portfolio_risk_snapshots")
+}
+
 /// Tracks premium session devices per user to enforce the concurrent-device cap (#288).
 model PremiumDevice {
   id           String   @id @default(uuid())
