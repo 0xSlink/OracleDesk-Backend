@@ -287,7 +287,9 @@ async function bootstrap(): Promise<void> {
   // indexer publishes to the bus; api pods fan out to connected sockets.
   if (rolePlan.startIndexer) {
     stopEventListener = startEventListener(async (type, payload, meta) => {
-      throttle?.handle(type, payload, meta);
+    // Sockets are fed by the bus fan-out (#93), not from here. The #96 throttle
+    // used to sit on this callback, but PublishMeta carries no `live` flag, so
+    // it dropped every event as historical; it was never reaching clients.
       await bus.publish({ ...meta, type, payload });
     });
   }

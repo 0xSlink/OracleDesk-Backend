@@ -234,14 +234,14 @@ model Market {
   resolutionSpec     Json?
   /// Commitment scheme used to compute resolutionHash: 'legacy' | 'v2' | 'scaled' | 'twap' (ADR 0004).
   /// CHECK: markets_resolution_scheme_values (resolution_scheme IN ('legacy','v2','scaled','twap'))
-  resolutionScheme   String    @default("legacy")
+  resolutionScheme   String    @default("legacy") @map("resolution_scheme")
   /// Random 32-byte salt (hex) for V2 commitments. NULL for legacy/scaled/twap.
   /// Never served in API responses before reveal.
-  resolutionSalt     String?
+  resolutionSalt     String? @map("resolution_salt")
   /// sha256(STELLAR_NETWORK_PASSPHRASE) hex — binds V2 hashes to a network.
-  resolutionNetworkId String?
+  resolutionNetworkId String? @map("resolution_network_id")
   /// Contract address of the market-core this hash was committed against (V2 only).
-  resolutionMarketCore String?
+  resolutionMarketCore String? @map("resolution_market_core")
   /// Seed policy inputs, bounds, binding constraint and expected LP loss (#82).
   seedPolicy         Json?
   /// Highest ledger whose chain state this row reflects; guards writes from the indexer and the reconciler (#83).
@@ -485,6 +485,9 @@ model ReasoningTrace {
   previewSources      Json?             // First 2 sources (free preview)
   lastAuditStatus     TraceAuditStatus?
   lastAuditedAt       DateTime?
+  /// Confidential storage (#154): ENCRYPTED traces pin an envelope, not plaintext.
+  contentMode         TraceContentMode  @default(PLAINTEXT_LEGACY)
+  plaintextHash       String?           @db.VarChar(64)
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
@@ -494,6 +497,7 @@ model ReasoningTrace {
   paymentEvents PaymentEvent[]
   audits        TraceAudit[]
   publication   TracePublication?
+  traceKey      TraceKey?
 
   @@index([marketId])
   @@index([ipfsCid])
@@ -504,6 +508,24 @@ model ReasoningTrace {
   /// Retention (#73) keeps signals cited by a trace: `sourcesUsed @> [{"signalId": …}]`.
   @@index([sourcesUsed(ops: JsonbPathOps)], type: Gin)
   @@map("reasoning_traces")
+}
+
+enum TraceContentMode {
+  PLAINTEXT_LEGACY
+  ENCRYPTED
+}
+
+/// Wrapped per-trace content key for ENCRYPTED traces (#154).
+model TraceKey {
+  traceId       String   @id
+  kid           String
+  wrappedKey    Bytes
+  plaintextHash String   @db.VarChar(64)
+  createdAt     DateTime @default(now())
+
+  trace ReasoningTrace @relation(fields: [traceId], references: [id], onDelete: Cascade)
+
+  @@map("trace_keys")
 }
 
 /// Daily calibration metrics per slice (#68). Append-only; the API serves the latest computedAt.
@@ -856,7 +878,7 @@ model PaymentEvent {
   refund Refund?
 
   @@index([userId])
-
+  @@map("payment_events")
 }
 
 // User-defined spending approvals for nanopayment trace access
@@ -1418,21 +1440,21 @@ model DisputeReview {
   /// Market category at review time, for calibration slicing (#247).
   category           MarketCategory?
   /// LlmProvenance JSON returned by callLLMStructured (#247).
-  evaluatorProvenance Json?
+  evaluatorProvenance Json? @map("evaluator_provenance")
   /// 'primary' | 'news' | 'none' — derived from evidence.items (#247).
-  evidenceClass      String?
+  evidenceClass      String? @map("evidence_class")
   /// 'YES' | 'NO' | 'VOID' — set by labelReviews once the market is final (#247).
-  finalOutcome       String?
+  finalOutcome       String? @map("final_outcome")
   /// True when proposedOutcome === finalOutcome for FINALIZED reviews (#247).
-  proposalCorrect    Boolean?
+  proposalCorrect    Boolean? @map("proposal_correct")
   /// Set when this review has been labelled against chain-final ground truth (#247).
-  labelledAt         DateTime?
+  labelledAt         DateTime? @map("labelled_at") @db.Timestamptz(6)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
   @@index([verdict])
   @@index([onChainMarketId])
-  @@index([labelledAt])
+  @@index([labelledAt], map: "dispute_reviews_labelled_at_idx")
   @@map("dispute_reviews")
 }
 
@@ -1512,6 +1534,8 @@ model WalletPnlDirtyMarket {
   reason          String?
 
   @@map("wallet_pnl_dirty_markets")
+}
+
 /// Short-lived exclusive hold on a question that prevents concurrent cycles
 /// from creating duplicate markets. Rows are HELD until the market is inserted
 /// (then COMMITTED), or released on skip/abort/failure.
@@ -1548,36 +1572,49 @@ model PortfolioRiskSnapshot {
 
   @@index([computedAt])
   @@map("portfolio_risk_snapshots")
+}
+
 /// Tracks premium session devices per user to enforce the concurrent-device cap (#288).
 model PremiumDevice {
-  id           String   @id @default(uuid())
-  userId       String
+  id            String    @id @default(uuid())
+  userId        String
   /// sha-256(deviceKey) so the raw secret never touches the DB
   deviceKeyHash String
-  label        String   @default("Device")
-  lastSeenAt   DateTime @default(now())
-  createdAt    DateTime @default(now())
+  label         String    @default("Device")
+  /// Session ids (JWT `sid`) that first registered and last used the device.
+  firstSid      String
+  lastSid       String
+  /// Salted hash of the client IP prefix (hashClientIp); never the raw IP.
+  ipPrefixHash  String?
+  lastSeenAt    DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+  /// Set when the device is evicted (LRU) or revoked; a fresher login re-admits it.
+  revokedAt     DateTime?
+  /// EVICTED_LRU | USER_REVOKED | ADMIN
+  revokeReason  String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, deviceKeyHash])
-  @@index([userId])
+  @@index([userId, lastSeenAt])
   @@map("premium_devices")
 }
 
 /// Per-user, per-day premium usage budget (#288).
 model PremiumUsageDaily {
-  id           String   @id @default(uuid())
-  userId       String
-  date         DateTime @db.Date
-  traceReads   Int      @default(0)
-  keyReleases  Int      @default(0)
-  updatedAt    DateTime @updatedAt
+  id                 String   @id @default(uuid())
+  userId             String
+  day                DateTime @db.Date
+  premiumReads       Int      @default(0)
+  keyReleases        Int      @default(0)
+  devicesEvicted     Int      @default(0)
+  distinctIpPrefixes Int      @default(0)
+  updatedAt          DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, date])
-  @@index([userId])
+  @@unique([userId, day])
+  @@index([distinctIpPrefixes])
   @@map("premium_usage_daily")
 }
 

@@ -13,8 +13,9 @@
  */
 import { DEFAULT_PARAMS, runTraderPolicy, type TraderParams } from '../agents/trader-policy';
 import type {
-  BuyOrder, Clock, DecisionRecord, ExecResult, Forecast, MarketView, PositionView, TraderEnv,
+  BuyOrder, Clock, DecisionPrice, DecisionRecord, ExecResult, Forecast, MarketView, PositionView, TraderEnv,
 } from '../agents/trader-env';
+import { StalePriceError } from '../services/market-price.service';
 import { MathError } from '../generated/fpmm';
 import { toDisplayUsdc, usdcFromNumber } from '../lib/amounts';
 import { canonicalJson, sha256Hex } from '../utils/hash.util';
@@ -108,6 +109,8 @@ class Replay {
   drawdownPauses = 0;
   externalTradesSkipped = 0;
   latestEventAt: Date | null = null;
+  /** Ledger of the newest applied event: the replay's "chain tip" for decision prices (#266). */
+  latestLedger = 0;
   now: Date;
   private cursor = 0;
   private nextId = 1;
@@ -137,6 +140,7 @@ class Replay {
       const event = this.events[this.cursor++];
       this.apply(event);
       this.latestEventAt = new Date(eventTime(event));
+      this.latestLedger = Math.max(this.latestLedger, event.ledger);
     }
   }
 
@@ -325,6 +329,7 @@ class BacktestEnv implements TraderEnv {
     return {
       id: m.id, category: m.category, currentYesProb: m.pool.priceYesBps() / 10_000, initialYesProb: m.initialYesProb,
       totalLiquidity: this.liquidity(m), expiryTimestamp: new Date(m.closeTime * 1000),
+      onChainMarketId: BigInt(m.id),
     };
   }
 
@@ -459,6 +464,23 @@ class BacktestEnv implements TraderEnv {
 
   async recordDecision(d: DecisionRecord) {
     if (d.kind === 'DRAWDOWN_PAUSE') this.r.drawdownPauses++;
+  }
+
+  /** The replayed pool is the indexed state as of the newest applied event: never stale (#266). */
+  async price(m: MarketView): Promise<DecisionPrice> {
+    this.seen('price');
+    const market = this.r.markets.get(m.id);
+    if (!market) throw new StalePriceError(`market ${m.id} is not in the replay`);
+    const { pool } = market;
+    return {
+      yesBps: BigInt(pool.priceYesBps()),
+      reserveYes: pool.reserveYes,
+      reserveNo: pool.reserveNo,
+      feeBps: pool.feeBps,
+      asOfLedger: this.r.latestLedger,
+      source: 'indexed',
+      lagLedgers: 0,
+    };
   }
 }
 

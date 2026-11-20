@@ -770,6 +770,23 @@ export const envSchema = envObjectSchema
   .superRefine((env, ctx) => {
     // ── Login signing-key rotation (#48) ──
     const currentPublic =
+    // ── Portfolio risk (Issue #280) ───────────────────────────────────────
+    // Monte Carlo paths per run, the largest positions kept, the shrinkage
+    // applied to snapshot correlations, and a soft wall-clock budget.
+    RISK_MC_PATHS: z.string().default('20000').transform(Number)
+      .pipe(z.number().int().min(100)),
+    RISK_MAX_MARKETS: z.string().default('150').transform(Number)
+      .pipe(z.number().int().min(1)),
+    RISK_RHO_SHRINK: z.string().default('0.8').transform(Number)
+      .pipe(z.number().min(0).max(1)),
+    RISK_MAX_DURATION_MS: z.string().default('10000').transform(Number)
+      .pipe(z.number().int().positive()),
+    // Expected-shortfall gate (bps of bankroll); off by default. Exported by the
+    // service, not yet enforced by any caller.
+    RISK_GATE_ENABLED: boolDefault('false'),
+    RISK_MAX_ES_BPS: z.string().default('500').transform(Number)
+      .pipe(z.number().int().min(0).max(10_000)),
+
       env.AUTH_SIGNING_SECRET && StrKey.isValidEd25519SecretSeed(env.AUTH_SIGNING_SECRET)
         ? Keypair.fromSecret(env.AUTH_SIGNING_SECRET).publicKey()
         : null;

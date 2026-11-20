@@ -2,7 +2,7 @@
  * A TraderEnv with in-memory answers, for driving runTraderPolicy without
  * Prisma, the chain or the wall clock. Every call is recorded.
  */
-import type { BuyOrder, DecisionRecord, Forecast, MarketView, TraderEnv } from '../../src/agents/trader-env';
+import type { BuyOrder, DecisionPrice, DecisionRecord, Forecast, MarketView, TraderEnv } from '../../src/agents/trader-env';
 import type { TreasuryBudget } from '../../src/services/treasury-budget.service';
 import type { AggregatedSignals } from '../../src/types';
 
@@ -34,6 +34,7 @@ export function market(over: Partial<MarketView> = {}): MarketView {
     initialYesProb: 0.5,
     totalLiquidity: 5_000,
     expiryTimestamp: new Date(T0.getTime() + 7 * 86_400_000),
+    onChainMarketId: 1n,
     ...over,
   };
 }
@@ -55,6 +56,8 @@ export function fakeTraderEnv(opts: {
   /** Fraction of the proposed size the correlation check keeps. */
   correlationKeep?: number;
   now?: () => Date;
+  /** Decision price (#266); defaults to a fresh indexed price at the market's currentYesProb. */
+  price?: (m: MarketView) => Promise<DecisionPrice>;
 } = {}): FakeEnv {
   const env: FakeEnv = {
     buys: [],
@@ -100,6 +103,19 @@ export function fakeTraderEnv(opts: {
     async buy(order) { env.buys.push(order); return { ok: true }; },
     async exit() { return { ok: true }; },
     async recordDecision(d) { env.decisions.push(d); },
+    async price(m) {
+      env.calls.push('price');
+      if (opts.price) return opts.price(m);
+      return {
+        yesBps: BigInt(Math.round((m.currentYesProb ?? m.initialYesProb) * 10_000)),
+        reserveYes: 0n,
+        reserveNo: 0n,
+        feeBps: 100n,
+        asOfLedger: 1_000,
+        source: 'indexed',
+        lagLedgers: 0,
+      };
+    },
   };
   return env;
 }

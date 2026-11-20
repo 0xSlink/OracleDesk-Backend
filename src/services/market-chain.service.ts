@@ -329,8 +329,8 @@ export async function createMarketOnChain(
     data: {
       resolutionSpec: spec as object,
       resolutionHash: resolutionHashHex,
-      questionHash,
-      metaUri,
+      questionHash: pinned.hash,
+      metaUri: `ipfs://${pinned.cid}`,
       seedAmountRaw: seed.toString(),
     },
   });
