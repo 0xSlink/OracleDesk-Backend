@@ -312,6 +312,18 @@ export const envObjectSchema = z
     // In-memory cache TTL for validated payment requirements.
     X402_PRICE_CACHE_TTL_MS: z.string().default('60000').transform(Number)
       .pipe(z.number().int().min(1000)),
+
+    // ── x402 allowance reservations (#219) ────────────────────────────────
+    // Shared HMAC-SHA256 secret the x402 trace service signs
+    // /x402/allowance/* requests with. Empty disables those endpoints (503).
+    // Dedicated: never X402_KEY_RELEASE_SECRET or another key.
+    X402_ALLOWANCE_HMAC_SECRET: optionalString.refine(
+      (v) => v === '' || v.length >= 32,
+      'must be at least 32 characters',
+    ),
+    // How long a RESERVED charge holds budget before the sweep expires it.
+    X402_ALLOWANCE_RESERVATION_TTL_SECONDS: z.string().default('120').transform(Number)
+      .pipe(z.number().int().min(10).max(3600)),
     // ── Server-issued payment intents (#52) ──────────────────────────────
     // How long a client may take to submit a transaction for an open intent.
     PAYMENT_INTENT_TTL_SECONDS: z.string().default('900').transform(Number)
@@ -906,6 +918,16 @@ export const envSchema = envObjectSchema
       }
       if (env.FEE_PAYER_SECRET === env.AUTH_SIGNING_SECRET) {
         ctx.addIssue({ code: 'custom', path: ['FEE_PAYER_SECRET'], message: 'must differ from AUTH_SIGNING_SECRET' });
+      }
+    }
+    if (env.X402_ALLOWANCE_HMAC_SECRET) {
+      for (const [label, other] of [
+        ['X402_KEY_RELEASE_SECRET', env.X402_KEY_RELEASE_SECRET],
+        ['JWT_SECRET', env.JWT_SECRET],
+      ] as const) {
+        if (other && env.X402_ALLOWANCE_HMAC_SECRET === other) {
+          ctx.addIssue({ code: 'custom', path: ['X402_ALLOWANCE_HMAC_SECRET'], message: `must differ from ${label}` });
+        }
       }
     }
     if (env.URI_REQUEST_SIGNING_SECRET) {
