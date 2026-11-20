@@ -1642,11 +1642,11 @@ model PremiumDevice {
   lastSid       String
   /// Salted hash of the client IP prefix (hashClientIp); never the raw IP.
   ipPrefixHash  String?
-  lastSeenAt    DateTime  @default(now())
-  createdAt     DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
   /// Set when the device is evicted (LRU) or revoked; a fresher login re-admits it.
-  revokedAt     DateTime?
-  /// EVICTED_LRU | USER_REVOKED | ADMIN
+  revokedAt     DateTime? @db.Timestamptz(3)
+  /// EVICTED_LRU | USER_REVOKED | ADMIN @db.Timestamptz(3)
   revokeReason  String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1665,7 +1665,7 @@ model PremiumUsageDaily {
   keyReleases        Int      @default(0)
   devicesEvicted     Int      @default(0)
   distinctIpPrefixes Int      @default(0)
-  updatedAt          DateTime @updatedAt
+  updatedAt          DateTime @updatedAt @db.Timestamptz(3)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

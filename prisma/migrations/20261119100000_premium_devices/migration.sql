@@ -11,9 +11,9 @@ CREATE TABLE "premium_devices" (
     "firstSid" TEXT NOT NULL,
     "lastSid" TEXT NOT NULL,
     "ipPrefixHash" TEXT,
-    "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "revokedAt" TIMESTAMP(3),
+    "lastSeenAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "revokedAt" TIMESTAMPTZ(3),
     "revokeReason" TEXT,
 
     CONSTRAINT "premium_devices_pkey" PRIMARY KEY ("id"),
@@ -31,7 +31,7 @@ CREATE TABLE "premium_usage_daily" (
     "keyReleases" INTEGER NOT NULL DEFAULT 0,
     "devicesEvicted" INTEGER NOT NULL DEFAULT 0,
     "distinctIpPrefixes" INTEGER NOT NULL DEFAULT 0,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "premium_usage_daily_pkey" PRIMARY KEY ("id"),
     CONSTRAINT "premium_usage_daily_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
