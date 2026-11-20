@@ -14,7 +14,7 @@ import { controlsOverview, pauseAgent, resumeAgent } from '../services/agent-con
 import { defaultDeps, runReconciliation } from '../services/market-reconciler.service';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../lib/prisma';
-import { TraceAuditStatus } from '@prisma/client';
+import { AgentDecisionKind, AgentDecisionReason, AgentType, TraceAuditStatus } from '@prisma/client';
 import { runTraceAudit } from '../services/trace-audit.service';
 import { sendError } from '../utils/response.util';
 import { logger } from '../lib/logger';
@@ -433,4 +433,145 @@ export async function cancelDisputeTx(req: Request, res: Response): Promise<void
 /** POST /admin/disputes/:id/void-tx — unsigned guardian_void_market. */
 export async function voidDisputeTx(req: Request, res: Response): Promise<void> {
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
+}
+
+function decisionQueryString(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
+    throw new AppError(400, 'VALIDATION_ERROR', `${name} must be a non-empty string of at most 200 characters`);
+  }
+  return value;
+}
+
+function decisionQueryEnum<T extends string>(
+  value: unknown,
+  name: string,
+  allowed: readonly T[],
+): T | undefined {
+  const raw = decisionQueryString(value, name);
+  if (raw === undefined) return undefined;
+  if (!allowed.includes(raw as T)) {
+    throw new AppError(400, 'VALIDATION_ERROR', `${name} must be one of: ${allowed.join(', ')}`);
+  }
+  return raw as T;
+}
+
+/** GET /admin/agent-decisions: filter and paginate individual decisions. */
+export async function getAgentDecisions(req: Request, res: Response): Promise<void> {
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const cycleId = decisionQueryString(req.query.cycleId, 'cycleId');
+  const marketId = decisionQueryString(req.query.marketId, 'marketId');
+  const agentType = decisionQueryEnum(req.query.agentType, 'agentType', Object.values(AgentType));
+  const kind = decisionQueryEnum(req.query.kind, 'kind', Object.values(AgentDecisionKind));
+  const reasonCode = decisionQueryEnum(req.query.reasonCode, 'reasonCode', Object.values(AgentDecisionReason));
+  const where = {
+    ...(cycleId ? { cycleId } : {}),
+    ...(marketId ? { marketId } : {}),
+    ...(agentType ? { agentType } : {}),
+    ...(kind ? { kind } : {}),
+    ...(reasonCode ? { reasonCode } : {}),
+  };
+  const [rows, total] = await Promise.all([
+    prisma.agentDecision.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
+    prisma.agentDecision.count({ where }),
+  ]);
+  sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
+}
+
+/** GET /admin/agent-decisions/cycles: recent cycle funnels grouped by agent. */
+export async function getAgentDecisionCycles(req: Request, res: Response): Promise<void> {
+  const { page, limit, skip } = parsePagination(req.query as any);
+  const [cycles, totalRows] = await Promise.all([
+    prisma.agentDecision.groupBy({
+      by: ['cycleId'],
+      _count: { _all: true },
+      _min: { createdAt: true },
+      _max: { createdAt: true },
+      orderBy: [{ _max: { createdAt: 'desc' } }, { cycleId: 'desc' }],
+      skip,
+      take: limit,
+    }),
+    prisma.$queryRaw<Array<{ total: string }>>`
+      SELECT COUNT(DISTINCT "cycleId")::text AS total FROM "agent_decisions"
+    `,
+  ]);
+  const total = Number(totalRows[0]?.total);
+  if (!Number.isSafeInteger(total) || total < 0) {
+    throw new Error('Agent decision cycle count is outside the supported pagination range');
+  }
+  const agents = cycles.length === 0
+    ? []
+    : await prisma.agentDecision.groupBy({
+        by: ['cycleId', 'agentType'],
+        where: { cycleId: { in: cycles.map((cycle) => cycle.cycleId) } },
+        _count: { _all: true },
+      });
+  const agentsByCycle = new Map<string, Array<{ agentType: AgentType; count: number }>>();
+  for (const row of agents) {
+    const list = agentsByCycle.get(row.cycleId) ?? [];
+    list.push({ agentType: row.agentType, count: row._count._all });
+    agentsByCycle.set(row.cycleId, list);
+  }
+  sendSuccess(
+    res,
+    cycles.map((cycle) => ({ ...cycle, agents: agentsByCycle.get(cycle.cycleId) ?? [] })),
+    200,
+    buildPaginationMeta(page, limit, total) as any,
+  );
+}
+
+/** GET /admin/agent-decisions/cycles/:cycleId: per-cycle decision funnel. */
+export async function getAgentDecisionCycleFunnel(req: Request, res: Response): Promise<void> {
+  const cycleId = decisionQueryString(req.params.cycleId, 'cycleId');
+  if (!cycleId) throw new AppError(400, 'VALIDATION_ERROR', 'cycleId is required');
+
+  const rows = await prisma.agentDecision.findMany({
+    where: { cycleId },
+    select: {
+      agentType: true,
+      kind: true,
+      reasonCode: true,
+      marketId: true,
+      traceId: true,
+      tradeId: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+  const steps = new Map<string, {
+    agentType: AgentType;
+    kind: AgentDecisionKind;
+    reasonCode: AgentDecisionReason;
+    count: number;
+    marketIds: Set<string>;
+  }>();
+  const marketCounts = new Map<string, number>();
+  for (const row of rows) {
+    const key = `${row.agentType}:${row.kind}:${row.reasonCode}`;
+    const step = steps.get(key) ?? {
+      agentType: row.agentType,
+      kind: row.kind,
+      reasonCode: row.reasonCode,
+      count: 0,
+      marketIds: new Set<string>(),
+    };
+    step.count++;
+    if (row.marketId) {
+      step.marketIds.add(row.marketId);
+      marketCounts.set(row.marketId, (marketCounts.get(row.marketId) ?? 0) + 1);
+    }
+    steps.set(key, step);
+  }
+
+  sendSuccess(res, {
+    cycleId,
+    totalDecisions: rows.length,
+    linkedTraces: rows.filter((row) => row.traceId !== null).length,
+    linkedTrades: rows.filter((row) => row.tradeId !== null).length,
+    steps: [...steps.values()].map(({ marketIds, ...step }) => ({
+      ...step,
+      marketCount: marketIds.size,
+    })),
+    markets: [...marketCounts].map(([marketId, decisionCount]) => ({ marketId, decisionCount })),
+  });
 }

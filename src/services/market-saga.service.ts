@@ -151,7 +151,7 @@ const STEPS: Record<string, StepFn> = {
     }
 
     const market = await prisma.$transaction(async (tx) => {
-      const created = await createMarketFromProposal(proposal, tx);
+      const created = await createMarketFromProposal(proposal, undefined, undefined, tx);
       await tx.marketGenerationRun.update({
         where: { id: ctx.run.id },
         data: { marketId: created.id },

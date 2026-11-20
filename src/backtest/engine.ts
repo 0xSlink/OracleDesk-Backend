@@ -13,7 +13,7 @@
  */
 import { DEFAULT_PARAMS, runTraderPolicy, type TraderParams } from '../agents/trader-policy';
 import type {
-  BuyOrder, Clock, DecisionRecord, ExecResult, Forecast, MarketView, PositionView, TraderEnv,
+  BuyOrder, Clock, DecisionRecord, DecisionPrice, ExecResult, Forecast, MarketView, PositionView, TraderEnv,
 } from '../agents/trader-env';
 import { MathError } from '../generated/fpmm';
 import { toDisplayUsdc, usdcFromNumber } from '../lib/amounts';
@@ -384,11 +384,25 @@ class BacktestEnv implements TraderEnv {
     return { news, fed, macro, aggregatedAt: now, signalCount: news.length + fed.length + macro.length };
   }
 
+  async price(market: MarketView): Promise<DecisionPrice> {
+    const sim = this.r.markets.get(market.id);
+    if (!sim) throw new Error(`Unknown backtest market ${market.id}`);
+    return {
+      yesBps: BigInt(sim.pool.priceYesBps()),
+      reserveYes: sim.pool.reserveYes,
+      reserveNo: sim.pool.reserveNo,
+      feeBps: sim.pool.feeBps,
+      asOfLedger: 0,
+      source: 'indexed',
+      lagLedgers: 0,
+    };
+  }
+
   async closedPnlSince(t: Date) {
     this.seen('closedPnlSince');
     return this.r.positions
       .filter((p) => p.status === 'CLOSED' && p.closedAt && p.closedAt.getTime() >= t.getTime())
-      .map((p) => toDisplayUsdc(p.payoutRaw - p.collateralRaw));
+      .map((p) => p.payoutRaw - p.collateralRaw);
   }
 
   async forecast(m: MarketView): Promise<Forecast | null> {

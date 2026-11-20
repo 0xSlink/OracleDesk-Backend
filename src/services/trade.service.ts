@@ -14,7 +14,15 @@ import { registerHandler, type ChainTransactionRow, type CompletionOutcome } fro
 import { Prisma } from '@prisma/client';
 import { enqueueTracePublication } from './trace-publish.service';
 import { tradeTraceAction } from '../lib/trace-actions';
-import { bigintToDecimalString, mulDivCeil, usdcFromNumber } from '../lib/amounts';
+import {
+  bigintToDecimalString,
+  decimalToBigint,
+  mulDivCeil,
+  priceBpsFromRaw,
+  priceToBps,
+  toDisplayUsdc,
+  usdcFromNumber,
+} from '../lib/amounts';
 import { config } from '../config';
 import { TREASURY_CAP_ERRORS } from './treasury-budget.service';
 import { ChainError } from './stellar/errors';
@@ -40,7 +48,8 @@ export async function applyBuySuccess(
   const trade = await prisma.trade.findUnique({ where: { id: tradeId }, select: { id: true, marketId: true, direction: true, amount: true } });
   if (!trade) return;
 
-  const effectivePrice = fill.sharesOut > 0n ? Math.min(1, Number(fill.collateralIn) / Number(fill.sharesOut)) : 0;
+  const fillPriceBps = priceBpsFromRaw(fill.collateralIn, fill.sharesOut);
+  const effectivePrice = fillPriceBps === null ? 0 : fillPriceBps / 10_000;
 
   await prisma.trade.updateMany({
     where: { id: tradeId, status: { in: ['PENDING'] } },
@@ -49,6 +58,10 @@ export async function applyBuySuccess(
       txHash: fill.txHash,
       innerTxHash: fill.innerTxHash ?? fill.txHash,
       executedAt: new Date(),
+      collateralRaw: bigintToDecimalString(fill.collateralIn),
+      sharesRaw: bigintToDecimalString(fill.sharesOut),
+      feeRaw: bigintToDecimalString(fill.feeRaw),
+      ...(fillPriceBps === null ? {} : { fillPriceBps }),
     },
   });
   try {
@@ -60,9 +73,10 @@ export async function applyBuySuccess(
         status: 'OPEN',
         entryPrice: effectivePrice,
         currentPrice: effectivePrice,
-        size: trade.amount,
+        size: toDisplayUsdc(fill.collateralIn),
         pnl: 0,
         sharesRaw: bigintToDecimalString(fill.sharesOut),
+        entryPriceBps: fillPriceBps,
         costBasisRaw: bigintToDecimalString(fill.collateralIn),
         feesPaidRaw: bigintToDecimalString(fill.feeRaw),
       },
@@ -152,6 +166,9 @@ export async function executeTrade(payload: TradePayload): Promise<{
       direction:     payload.direction,
       status:        'PENDING',
       amount:        payload.amount,
+      amountRaw:     bigintToDecimalString(collateralOf(payload)),
+      priceBps:      priceToBps(payload.price),
+      edgeBps:       Math.round(payload.edgeDetected * 10_000),
       price:         payload.price,
       edgeDetected:  payload.edgeDetected,
       kellyFraction: payload.kellyFraction,
@@ -366,16 +383,23 @@ export async function closePosition(
     throw new AppError(409, 'POSITION_CLOSED', 'Position is already closed');
   }
 
-  const pnl =
-    position.direction === 'YES'
-      ? (closePrice - position.entryPrice) * position.size
-      : (position.entryPrice - closePrice) * position.size;
+  if (position.sharesRaw == null || position.costBasisRaw == null) {
+    throw new AppError(409, 'POSITION_ACCOUNTING_RAW_MISSING', 'Position must be backfilled before it can be closed');
+  }
+  const closePriceBps = priceToBps(closePrice);
+  const markValueRaw = (decimalToBigint(position.sharesRaw) * BigInt(closePriceBps)) / 10_000n;
+  const unrealisedPnlRaw = markValueRaw - decimalToBigint(position.costBasisRaw);
+  const pnlRaw = decimalToBigint(position.realisedPnlRaw) + unrealisedPnlRaw;
+  const pnl = toDisplayUsdc(pnlRaw);
 
   const closed = await prisma.position.update({
     where: { id: positionId },
     data:  {
       status:       closeReason === 'STOP_LOSS' ? 'STOP_LOSS' : 'CLOSED',
-      currentPrice: closePrice,
+      currentPrice: closePriceBps / 10_000,
+      markPriceBps: closePriceBps,
+      markValueRaw: bigintToDecimalString(markValueRaw),
+      unrealisedPnlRaw: bigintToDecimalString(unrealisedPnlRaw),
       pnl,
       closedAt:     new Date(),
       closeReason,

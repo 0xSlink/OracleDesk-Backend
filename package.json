@@ -20,6 +20,7 @@
     "check:contracts": "node scripts/sync-contracts.mjs --check",
     "backtest": "node -r ts-node/register/transpile-only scripts/backtest.ts",
     "verify:report": "node -r ts-node/register/transpile-only scripts/verify-report.ts",
+    "copy-trade:reverify-report": "tsx scripts/reverify-copy-trades.ts",
     "lint:migrations": "bash scripts/lint-migrations.sh",
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force --skip-seed && npm run db:seed",

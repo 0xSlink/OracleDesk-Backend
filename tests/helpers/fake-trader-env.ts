@@ -51,7 +51,7 @@ export function fakeTraderEnv(opts: {
   markets?: MarketView[];
   forecast?: (m: MarketView) => Forecast | null;
   exposureRaw?: bigint;
-  closedPnl?: number[];
+  closedPnl?: bigint[];
   /** Fraction of the proposed size the correlation check keeps. */
   correlationKeep?: number;
   now?: () => Date;
@@ -100,6 +100,17 @@ export function fakeTraderEnv(opts: {
     async buy(order) { env.buys.push(order); return { ok: true }; },
     async exit() { return { ok: true }; },
     async recordDecision(d) { env.decisions.push(d); },
+    async price(m) {
+      return {
+        yesBps: BigInt(Math.round((m.currentYesProb ?? 0.5) * 10_000)),
+        reserveYes: 0n,
+        reserveNo: 0n,
+        feeBps: 0n,
+        asOfLedger: 0,
+        source: 'indexed',
+        lagLedgers: 0,
+      };
+    },
   };
   return env;
 }

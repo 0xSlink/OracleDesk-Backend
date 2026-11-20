@@ -358,10 +358,11 @@ export async function createMarketFromProposal(
   proposal: MarketProposal,
   provenance?: LlmProvenance,
   resolutionDetails?: QuestionResolutionBlock | null,
+  tx?: Prisma.TransactionClient,
 ): Promise<Market> {
   const finalCategory = normalizeCategory(proposal.category);
 
-  const market = await client.market.create({
+  const market = await (tx ?? prisma).market.create({
     data: {
       question:           proposal.market_question,
       category:           finalCategory,

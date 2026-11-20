@@ -15,7 +15,9 @@
 import { prisma } from '../lib/prisma';
 import { config } from '../config';
 import { now as clockNow } from '../lib/clock';
-import { usdcFromNumber } from '../lib/amounts';
+import { decimalToBigint } from '../lib/amounts';
+import { AppError } from '../middlewares/error.middleware';
+import { logger } from '../lib/logger';
 import { treasuryAvailableCapital, treasuryDailyUsage, treasuryRiskConfig } from './chain.service';
 
 const DAY_SECONDS = 86_400n;
@@ -129,10 +131,20 @@ export async function marketExposureRaw(marketId: string, onChainMarketId: bigin
   }
 
   const [trades, market] = await Promise.all([
-    prisma.trade.findMany({ where: { marketId, status: 'EXECUTED' }, select: { amount: true } }),
+    prisma.trade.findMany({
+      where: { marketId, status: 'EXECUTED' },
+      select: { amountRaw: true, collateralRaw: true },
+    }),
     prisma.market.findUnique({ where: { id: marketId }, select: { seedAmountRaw: true } }),
   ]);
-  const traded = trades.reduce((acc, t) => acc + usdcFromNumber(t.amount), 0n);
+  if (trades.some((trade) => trade.collateralRaw == null && trade.amountRaw == null)) {
+    logger.error({ marketId }, 'Cannot estimate market exposure: an executed trade has no raw collateral');
+    throw new AppError(503, 'MARKET_EXPOSURE_RAW_UNAVAILABLE', 'Market exposure is missing exact trade collateral');
+  }
+  const traded = trades.reduce(
+    (acc, trade) => acc + decimalToBigint(trade.collateralRaw ?? trade.amountRaw!),
+    0n,
+  );
   const seed = market?.seedAmountRaw && /^\d+$/.test(market.seedAmountRaw) ? BigInt(market.seedAmountRaw) : 0n;
   return { totalRaw: traded + seed, estimated: true };
 }
