@@ -1028,6 +1028,73 @@ Query parameters: `page`, `limit`, `status`.
 Schedules a trace audit run asynchronously in the background.
 Response `202 Accepted`: `{ "runId": "uuid", "message": "Trace audit run scheduled" }`.
 
+#### Outbox console (#221)
+
+`GET /admin/fees` (`admin.read`) aggregates `chain_fees` per day; the outbox
+console exposes the individual chain writes behind it: every live write is a
+`chain_transactions` row moving `BUILT → SIGNED → SUBMITTED → PENDING →
+SUCCESS | FAILED | EXPIRED` (#35). Reads need `chain.outbox.read` (granted to
+`operator` and `auditor`); actions need `chain.outbox.operate` (`operator`) and
+step-up (`403 STEP_UP_REQUIRED`). Both permissions reach existing databases
+through the `20261120100000_outbox_console_permissions` migration.
+
+No response or log line carries the signed envelope XDR, transaction or
+auth-entry signature bytes, or fee-bump envelopes.
+
+- `GET /admin/chain/transactions?status&kind&refId&hash&unhandled&olderThanSecs&page&limit`
+  — newest first. `status` is a comma-separated list of the statuses above;
+  `hash` (64 hex) matches the inner, landed or any fee-bump hash; `unhandled=true`
+  lists terminal rows whose completion handler has not run (`false` excludes
+  them); `olderThanSecs` keeps rows created at least that long ago. Rows carry
+  ids, kind, refId, status, hashes, bump/attempt counts, `submitLedger`,
+  `ledger`, timebounds, `error` and `handledAt`.
+- `GET /admin/chain/transactions/:id` — the row plus:
+  - `envelope`: `{ source, sequence, fee, timeBounds, operations: [{ type, contract, function, args }], authEntries: [{ address, nonce, signatureExpirationLedger }], signatureCount }`
+    (args decoded with `scValToNative`, BigInt as decimal strings);
+  - `feeBumps`: `[{ hash, fee, inclusionPerOp, at }]`;
+  - `rpc`: `getTransaction` for the inner hash and every fee-bump hash
+    (`status`, `ledger`, `latestLedgerCloseTime`, `oldestLedger`, decoded
+    `error` for `FAILED`). `resultXdr` is never stored, so results only exist
+    while RPC retains them;
+  - `expiry` (in-flight rows nothing landed for): the ledger-time expiry
+    decision `PENDING | EXPIRED | UNKNOWN` and its reason;
+  - `linked`: `market.create` → `{ market, creationAttempt }`, `trade.buy` →
+    `{ trade }`, `trade.sell` → `{ positionExit }`, `trace.publish` →
+    `{ reasoningTrace, tracePublication }`, other kinds `null`.
+
+Actions take `{ "reason": "10-500 chars" }`, run under the per-row Redis lease
+`outbox:row:<id>` that the recovery worker also takes, and each writes one
+`admin_audit_logs` row (`CHAIN_OUTBOX_RECOVER | CHAIN_OUTBOX_RERUN_HANDLER |
+CHAIN_OUTBOX_ABANDON`, metadata `{ outboxId, kind, fromStatus, toStatus,
+reason, hashes, outcome }`). Response: `{ id, kind, fromStatus, toStatus, handled, stats? }`.
+
+| Action | Preconditions | Effect |
+|---|---|---|
+| `POST /admin/chain/transactions/:id/recover` | non-terminal, or terminal with `handledAt` unset. `BUILT`/`SIGNED` rows younger than the 30 s signing grace belong to the live writer and are refused. | One recovery pass for the row (resolve by hash, resubmit `SIGNED`, expire by ledger time, fee-bump), or the missing completion handler. |
+| `POST /admin/chain/transactions/:id/rerun-handler` | `SUCCESS`, `FAILED` or `EXPIRED`. | Clears `handledAt` by compare-and-set, re-runs the kind's handler from the stored outcome (handlers are idempotent; `market.create` only links, never creates, a market) and marks it handled again. |
+| `POST /admin/chain/transactions/:id/abandon` | `SIGNED`, `SUBMITTED` or `PENDING`; no hash (inner or fee bump) landed; the latest ledger closed after `maxTime` + 60 s **and** `submitLedger` is inside RPC retention (`>= oldestLedger`). | `→ EXPIRED` with `error: "abandoned by admin: <reason>"`, then the `EXPIRED` handler. A `SIGNED` row may already have been sent, so it is judged exactly like `SUBMITTED`. |
+
+Errors:
+
+| Status | Code | When |
+|---|---|---|
+| 409 | `OUTBOX_ROW_BUSY` | The recovery worker or another operator holds the row lease; retry shortly. |
+| 409 | `OUTBOX_ROW_LANDED` | Abandon found a landed hash; the row was resolved by normal recovery instead (`details.landedHash`, `details.status`). |
+| 409 | `OUTBOX_NOT_PROVABLE` | Abandon cannot prove the envelope is dead: ledger time not past `maxTime` + skew (`decision: PENDING`), submission outside RPC retention or `submitLedger` unknown (`UNKNOWN`), or no `maxTime` (rows written before #42). |
+| 409 | `OUTBOX_INVALID_STATE` | The status does not allow the action, or the row moved concurrently. |
+| 404 | `OUTBOX_NOT_FOUND` | No such row. |
+| 500 | `OUTBOX_HANDLER_FAILED` | The completion handler threw; the row stays unhandled and the worker retries it. |
+| 503 | `OUTBOX_LEASE_UNAVAILABLE` | Redis is down; actions fail closed. |
+| 503 | `OUTBOX_RPC_UNAVAILABLE` | Abandon could not query every hash. |
+
+The recovery worker decides expiry the same way (ledger close time and RPC
+retention, never the host clock); when expiry is unprovable it leaves the row
+in flight with the reason in `error`. After an abandon, the agent's cached
+sequence (`stellar/sequence.ts`) is one ahead of the account: the next live
+write is rejected `tx_bad_seq` before submission, resyncs the sequence from
+RPC and is rebuilt by the retry loop (`BAD_SEQUENCE → resync-rebuild`), so no
+manual repair is needed.
+
 ### Agent controls (admin auth, #79)
 
 A persistent kill switch and pause shared by every backend instance. Scopes:

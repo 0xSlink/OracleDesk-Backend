@@ -61,6 +61,8 @@ import {
   recordSubmitted,
   submitOperation,
 } from '../services/treasury-ops.service';
+import { outboxActionSchema, outboxIdSchema, outboxListQuerySchema } from '../validators/admin.validator';
+import { abandon, listOutbox, outboxDetail, recoverNow, rerunHandler } from '../services/outbox-admin.service';
 
 function actor(req: Request): string {
   if (!req.user) throw new AppError(401, 'UNAUTHORIZED', 'Authentication required');
@@ -491,4 +493,54 @@ export async function cancelDisputeTx(req: Request, res: Response): Promise<void
 /** POST /admin/disputes/:id/void-tx — unsigned guardian_void_market. */
 export async function voidDisputeTx(req: Request, res: Response): Promise<void> {
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
+}
+
+// ─── Admin outbox console (#221) ─────────────────────────────────────────
+
+function outboxId(req: Request): string {
+  const parsed = outboxIdSchema.safeParse(String(req.params.id ?? ''));
+  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'id must be a chain transaction UUID');
+  return parsed.data;
+}
+
+function outboxReason(req: Request): string {
+  const parsed = outboxActionSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'reason is required (10-500 characters)', parsed.error.flatten().fieldErrors as any);
+  }
+  return parsed.data.reason;
+}
+
+/** GET /admin/chain/transactions — outbox rows, newest first, with filters. */
+export async function listChainTransactions(req: Request, res: Response): Promise<void> {
+  const parsed = outboxListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid outbox filter', parsed.error.flatten().fieldErrors as any);
+  }
+  const { page, limit } = parsePagination(req.query as any);
+  const { rows, total } = await listOutbox({ ...parsed.data, page, limit });
+  sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
+}
+
+/** GET /admin/chain/transactions/:id — decoded envelope, fee bumps, RPC status, linked rows. */
+export async function getChainTransaction(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await outboxDetail(outboxId(req)));
+}
+
+/** POST /admin/chain/transactions/:id/recover — one recovery pass for this row now. */
+export async function recoverChainTransaction(req: Request, res: Response): Promise<void> {
+  const id = outboxId(req);
+  sendSuccess(res, await recoverNow(id, actor(req), outboxReason(req)));
+}
+
+/** POST /admin/chain/transactions/:id/rerun-handler — terminal rows only. */
+export async function rerunChainTransactionHandler(req: Request, res: Response): Promise<void> {
+  const id = outboxId(req);
+  sendSuccess(res, await rerunHandler(id, actor(req), outboxReason(req)));
+}
+
+/** POST /admin/chain/transactions/:id/abandon — only when the envelope provably cannot land. */
+export async function abandonChainTransaction(req: Request, res: Response): Promise<void> {
+  const id = outboxId(req);
+  sendSuccess(res, await abandon(id, actor(req), outboxReason(req)));
 }
