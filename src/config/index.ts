@@ -87,7 +87,9 @@ const reflectorFeeds = z
   })
   .pipe(z.record(z.string(), z.record(z.string(), reflectorFeedSchema)));
 
-export const PROBE_NAMES = ['database', 'redis', 'rpc', 'indexer'] as const;
+// outbox, signers and channels are the chain-write probes (#220); they are only
+// ever critical on an instance that writes (see isChainWriter in health.service).
+export const PROBE_NAMES = ['database', 'redis', 'rpc', 'indexer', 'outbox', 'signers', 'channels'] as const;
 
 const probeName = z
   .string()
@@ -505,6 +507,15 @@ export const envObjectSchema = z
     INDEXER_MAX_LAG_LEDGERS: z.string().default('120').transform(Number),
     INDEXER_MAX_STALENESS_MS: z.string().default('60000').transform(Number),
     LIVENESS_MAX_LOOP_DELAY_MS: z.string().default('2000').transform(Number),
+    // Chain-write readiness (#220). auto = live mode && this process runs the
+    // outbox worker (PROCESS_ROLE all|worker); true/false force it. On a
+    // non-writer the outbox/signers/channels probes are no-ops and never critical.
+    HEALTH_CHAIN_WRITER: z.enum(['auto', 'true', 'false']).default('auto'),
+    HEALTH_OUTBOX_MAX_INFLIGHT: z.string().default('50').transform(Number).pipe(z.number().int().min(1)),
+    HEALTH_OUTBOX_MAX_AGE_MS: z.string().default('300000').transform(Number).pipe(z.number().int().min(1)),
+    HEALTH_HANDLER_MAX_STREAK: z.string().default('5').transform(Number).pipe(z.number().int().min(1)),
+    HEALTH_BALANCE_MIN_RUNWAY_HOURS: z.string().default('24').transform(Number).pipe(z.number().min(0)),
+    HEALTH_BALANCE_TTL_MS: z.string().default('60000').transform(Number).pipe(z.number().int().min(0)),
     // Time /readyz reports "draining" before the HTTP server stops accepting.
     SHUTDOWN_DRAIN_MS: z.string().default('5000').transform(Number),
 

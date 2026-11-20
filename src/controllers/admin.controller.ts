@@ -20,7 +20,7 @@ import { sendError } from '../utils/response.util';
 import { logger } from '../lib/logger';
 import { config } from '../config';
 import { secret } from '../config/secrets';
-import { health } from '../services/health.service';
+import { chainWritesStatus, health } from '../services/health.service';
 import { indexerStatus } from '../services/indexer.service';
 import { agentSigner } from '../services/stellar/clients';
 import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat';
@@ -316,6 +316,8 @@ export async function getSystemStatus(_req: Request, res: Response): Promise<voi
       agentPublicKey: agentSigner().publicKey ?? null,
       preflight: 'not_implemented',
     },
+    // Outbox backlog, handler streaks, signer/channel balances (#220). Public keys only.
+    chainWrites: await chainWritesStatus().catch(() => null),
     llm: {
       anthropicConfigured: secret('ANTHROPIC_API_KEY') !== '',
       geminiConfigured: secret('GEMINI_API_KEY') !== '',
