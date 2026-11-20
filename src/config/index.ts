@@ -626,6 +626,8 @@ export const envObjectSchema = z
     TRADER_MAX_PRICE_DRIFT_BPS: z.string().default('150').transform(Number).pipe(z.number().int().min(0)),
     /** Consecutive stale-price markets that abort the scan cycle with PRICE_SOURCE_DOWN. */
     TRADER_STALE_ABORT_COUNT: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
+    /** #225 — max ledgers the reserves the trader sizes against may lag the RPC (valuation DEFAULT_MAX_AGE_LEDGERS). */
+    TRADER_POOL_MAX_AGE_LEDGERS: z.string().default('120').transform(Number).pipe(z.number().int().min(1)),
     // #147 — development-only local IPFS stub selected explicitly.
     IPFS_TRANSPORT: z.enum(['pinata', 'local']).default('pinata'),
     IPFS_LOCAL_DIR: z.string().default('.ipfs-local'),

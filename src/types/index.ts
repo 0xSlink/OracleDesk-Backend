@@ -177,6 +177,8 @@ export interface TradePayload {
   tracePayload?: Record<string, unknown>;
   /** Average-price limit and deadline from the decision (#245). */
   bounds?: import('../services/trade-bounds').TradeBounds;
+  /** Conservative probability of the side bought; a re-quote at or above it cancels the order (#225). */
+  conservativeProb?: number;
 }
 
 export interface CopyTradePayload {
