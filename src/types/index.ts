@@ -165,8 +165,8 @@ export interface TradePayload {
   kellyFraction: number;
   edgeDetected: number;
   traceId?: string;
-  /** Trace document to pin and publish once the trade is on-chain. */
-  tracePayload?: Record<string, unknown>;
+  /** Trace document to pin and publish once the trade is on-chain (#227). */
+  tracePayload?: import('../schemas/trace').TraceDocV2;
   /** Average-price limit and deadline from the decision (#245). */
   bounds?: import('../services/trade-bounds').TradeBounds;
 }
@@ -213,6 +213,8 @@ export interface TraceInput {
   forecast?: Record<string, unknown>;
   /** Treasury-aware sizing: Kelly/correlation/final sizes, binding constraint, budget snapshot (#76). */
   sizing?: Record<string, unknown>;
+  /** Cross-source corroboration verdict for market-creation traces (#228). */
+  corroboration?: { kind: 'CORROBORATED' | 'AUTHORITATIVE' | 'UNCORROBORATED'; units: number; domains: string[] };
 }
 
 export interface TraceVerification {

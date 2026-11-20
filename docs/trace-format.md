@@ -9,7 +9,7 @@ OracleDesk pins verifiable artefacts to IPFS:
 ## 1. Versioning Policy
 
 Every pinned document includes explicit metadata:
-- `schemaVersion`: an integer version number (e.g. `1` for TraceDocV1, `2` for QuestionDocV2).
+- `schemaVersion`: an integer version number (e.g. `2` for TraceDocV2, `2` for QuestionDocV2).
 - `kind`: document discriminator (e.g. `'oracledesk.trace'`, `'oracledesk.question'`, `'oracledesk.trace.enc'`).
 
 Any semantic change, added required field, or removed field bumps `schemaVersion`.
@@ -71,6 +71,78 @@ JSON Schema URL: `https://api.oracledesk.io/api/v1/schemas/trace/v1.json`
   "createdAt": "2026-10-17T00:00:00.000Z"
 }
 ```
+
+---
+
+## 3b. Reasoning Trace Document (v2)
+
+JSON Schema URL: `https://api.oracledesk.io/api/v1/schemas/trace/v2.json` (committed as `src/schemas/trace-v2.schema.json`).
+
+Every trace generated since #227 is v2. It is v1 plus everything the agents compute for a decision. v1 is published with `additionalProperties: false`, so these fields bump the version instead of changing v1:
+
+| Field | Type | Notes |
+|---|---|---|
+| `sourcesUsed[]` | object | v1 keys plus `signalId`, `url`, `publisher`, `publishedAt` (#73). Each one is `null` when the signal does not carry it. |
+| `provenance` | object | `{ schema, llm: [...], generator }` (#66). `llm` has at least one entry, because the hedge-condition fallback records a `source: "default"` entry. `fallbackFrom` and `generator.commit` are omitted, not nulled, when they don't apply. |
+| `forecast` | object \| null | Ensemble members, weights and input digests (#75). Trader traces only. |
+| `sizing` | object \| null | Kelly/correlation/final sizes and budget snapshot (#76). Trader traces only. |
+| `seedPolicy` | object \| null | Seed-policy record (#82). Market-creation traces only. |
+| `correlation` | object \| null | `{ pairs, method: "snapshot"\|"matrix", snapshotId }` (#80). Trader traces only. |
+| `corroboration` | object \| null | `{ kind: "CORROBORATED"\|"AUTHORITATIVE"\|"UNCORROBORATED", units, domains }` (#228). Market-creation traces only; the corroborating signals are also in `sourcesUsed`. |
+
+`createdAt` comes from `lib/clock`, so cassette replays produce identical bytes. `forecast`, `sizing`, `seedPolicy` and `correlation.pairs` are normalised to plain JSON before validation: `Date` values become ISO strings, `bigint` values become decimal strings, and non-finite numbers become `null`.
+
+```json
+{
+  "schemaVersion": 2,
+  "kind": "oracledesk.trace",
+  "traceId": "11111111-1111-4111-8111-111111111111",
+  "agentType": "MARKET_MAKER",
+  "decisionType": "MARKET_CREATION",
+  "action": "market_creation",
+  "market": { "backendId": "22222222-2222-4222-8222-222222222222", "onChainId": null },
+  "probabilityEstimate": 0.65,
+  "marketProbability": 0.62,
+  "edge": 0.03,
+  "confidenceInterval": { "lower": 0.55, "upper": 0.75 },
+  "sourcesUsed": [
+    {
+      "source": "NEWS",
+      "weight": 0.8,
+      "signal": "Fed signals a pause",
+      "rawValue": null,
+      "signalId": "sig_01",
+      "url": "https://example.com/fed",
+      "publisher": "Example Wire",
+      "publishedAt": "2026-10-16T12:00:00.000Z"
+    }
+  ],
+  "betFraction": null,
+  "betSizeUsdc": null,
+  "hedgeConditions": ["Close if market probability rises above 0.75"],
+  "agentWallet": null,
+  "createdAt": "2026-10-17T00:00:00.000Z",
+  "provenance": {
+    "schema": "oracledesk.trace.provenance/1",
+    "llm": [
+      { "source": "default", "promptId": "hedge-conditions", "promptVersion": 1, "reason": "LLM_FAILED" }
+    ],
+    "generator": { "service": "oracledesk-backend", "version": "1.0.0" }
+  },
+  "forecast": null,
+  "sizing": null,
+  "seedPolicy": { "seedRaw": "100000000", "initialYesBps": 6200 },
+  "correlation": null,
+  "corroboration": { "kind": "CORROBORATED", "units": 2, "domains": ["example.com", "wire.example.org"] }
+}
+```
+
+### On-chain market id policy
+
+- `market.onChainId` records what was known **when the decision was made**. `generateReasoningTrace` reads it from `markets.onChainMarketId`. It is usually `null` for market-creation traces, because the trace is generated before the creation transaction is confirmed, and it is set for trader traces on live markets.
+- It is **never updated afterwards**. The payload is final when it is enqueued: no caller adds keys to it (the old top-level `onChainMarketId` spread is gone), and the pinned bytes define `traceHash`.
+- The **authoritative link** is the registry entry's `market_id`. The publication worker reads it from `markets.onChainMarketId` at publish time and passes it to `publish_trace`.
+- The worker validates the stored payload before pinning and again before publishing. A payload that declares `schemaVersion: 2` and fails the v2 schema, or whose `traceId` differs from the row's, fails with `TRACE_PAYLOAD_INVALID`. A v2 payload whose non-null `market.onChainId` differs from the market row's id fails with `TRACE_MARKET_MISMATCH`, so a trace is never registered under the wrong market. v1 and legacy payloads that were already enqueued keep pinning byte-for-byte as stored.
 
 ---
 

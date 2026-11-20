@@ -986,6 +986,67 @@ the pin. `fetchVerifiedBytes(cid, expectedSha256, verifiedBy)`:
    equal the expected hash (on-chain or pin hash);
 3. otherwise consults the gateway, stores bytes only after they verify, and
    returns unverified bytes without caching so callers can report a mismatch.
+## Cross-source corroboration (#228)
+
+The injection guard above checks that a proposal cites signals that were really
+sent. It cannot tell a real story from a planted, mistaken or satirical one: one
+article in NewsAPI or GDELT is enough to pass it, and the market that follows
+gets treasury seed liquidity, a pinned question document and an on-chain trace
+that cites the lone article. The corroboration gate sits between resolvability
+(step 2b/2c) and the dedup reservation in `runMarketMakerCycle` (step 2d).
+
+**Policy** (`checkCorroboration` in `src/services/llm-guard.service.ts`, pure and
+deterministic; `assessCorroboration` in `src/services/corroboration.service.ts`
+does the one signal-store read per cycle):
+
+1. **Claim matching.** Entities come from `extractEntities` run on the
+   *sanitised* question. A candidate store row matches when its title and
+   summary cover every gazetteer entity of the question (or at least two
+   `NAME:` entities when there are none), share at least two meaningful tokens
+   with it, and were published within `CORROBORATION_WINDOW_HOURS` (72) before
+   now. The window is wider than the aggregator's 24 h on purpose. The
+   grounding signals are candidates too. FRED rows never match: they have no
+   URL and cluster per series.
+2. **Independence.** Matching rows are grouped by near-duplicate cluster
+   (`clusterId`, else the row). Each group's publishers are registrable domains
+   (`src/lib/domains.ts`: URL host without `www.`, folded to eTLD+1 with a small
+   multi-label suffix table, falling back to the lower-cased publisher only
+   when there is no URL, since GDELT reports a domain and NewsAPI a display
+   name). Groups that share a domain, or whose texts are within
+   `CORROBORATION_SIMHASH_REWRITE` (10, looser than clustering) bits of each
+   other, merge into one unit (union-find, so candidate order never matters).
+   `CORROBORATED` needs `CORROBORATION_MIN_PUBLISHERS` (2) units spanning two
+   domains. Twelve syndicated copies under twelve mastheads are one cluster and
+   one unit. A URL count is never used.
+3. **Authoritative exemption.** `AUTHORITATIVE` when FRED resolves the question
+   and a grounding FRED signal is the series that measures it (`fredSeriesFor`,
+   the resolvability FRED table, with FEDFUNDS accepted for fed-funds
+   questions), or when FRED/ECB resolves a question whose extracted deadline is
+   exactly a scheduled FOMC/ECB announcement (`meetingAt`) and at least one
+   news candidate matches. There is no category-wide bypass. "Will the Fed cut
+   by December 31" names no meeting and needs ordinary corroboration.
+
+**Modes** (`CORROBORATION_MODE`): `off`; `observe` (default for the first
+release) logs `PROPOSAL_UNCORROBORATED` and creates the market anyway, and
+fails open if the store read fails; `enforce` returns before the reservation,
+so an uncorroborated proposal produces no DB row, IPFS pin, seed or trace, and
+a failed check fails closed. Config validation requires `enforce` in live mode
+unless `CORROBORATION_ALLOW_OBSERVE_LIVE=true`.
+
+**Recording.** `Market.corroboration` holds `{ kind, corroborators: [{ signalId,
+clusterId, domain, source, publishedAt }], policy, checkedAt }`. The creation
+trace's `sourcesUsed` is the grounding evidence plus the corroborating rows
+(deduped by `signalId`, so retention keeps them), and TraceDocV2 carries
+`corroboration: { kind, units, domains }`. `PROPOSAL_UNCORROBORATED` logs carry
+unit and domain counts, the domains, and `sha256(signalId)` hashes, never
+signal text.
+
+**Residual risk.** An attacker who publishes two *different* fabricated texts on
+two domains they control is counted as two units: rewrite-distance merging
+catches near-copies only. The logged domains let operators find and blocklist
+such pairs. Credibility weighting of publishers is out of scope here and belongs
+to source-weight learning.
+
 
 sha256 is the admission criterion; the CID is only a lookup key. A CID can
 never map to two hashes (`IPFS_CID_HASH_CONFLICT`). Objects above

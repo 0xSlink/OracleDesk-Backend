@@ -244,6 +244,8 @@ model Market {
   resolutionMarketCore String? @map("resolution_market_core")
   /// Seed policy inputs, bounds, binding constraint and expected LP loss (#82).
   seedPolicy         Json?
+  /// Cross-source corroboration verdict (#228): { kind, corroborators, policy, checkedAt }. Null for markets created before the gate.
+  corroboration      Json?
   /// Highest ledger whose chain state this row reflects; guards writes from the indexer and the reconciler (#83).
   chainSyncedLedger  Int?
   lastReconciledAt   DateTime?          @db.Timestamptz(3)

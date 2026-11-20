@@ -6,7 +6,10 @@ import { hedgeConditionsV1 } from '../lib/prompts';
 import { buildTraceProvenance, type ProvenanceEntry } from '../lib/llm/provenance';
 import { renderUntrustedBlock, sanitizeSignal } from './llm-guard.service';
 import { logger } from '../lib/logger';
-import { Prisma } from '@prisma/client';
+import { Prisma, type ReasoningTrace } from '@prisma/client';
+import { randomUUID } from 'crypto';
+import { ZodError } from 'zod';
+import { buildTraceDocV2, type TraceDocV2 } from '../schemas/trace';
 import type {
   AggregatedSignal,
   TraceInput,
@@ -30,14 +33,21 @@ export { traceReasoningSchema };
  * 4. Record provenance (#66): who produced the market proposal (when the
  *    caller passes it) and the hedge conditions, as `tracePayload.provenance`.
  *    It is part of the pinned bytes, so it is committed with the trace.
- * 5. Persist to DB. The hash is computed later, over the exact bytes pinned
- *    to IPFS (services/trace-publish.service.ts), never over this object.
+ * 5. Build the TraceDocV2 document (#227) and persist the row under the same
+ *    pre-allocated id. The document is final: callers enqueue it unchanged and
+ *    the hash is computed later, over the exact bytes pinned to IPFS
+ *    (services/trace-publish.service.ts).
+ *
+ * `market.onChainId` records what was known when the decision was made (null
+ * for most market-creation traces) and is never updated. The registry entry's
+ * market_id, read by the publication worker at publish time, is the
+ * authoritative link (docs/trace-format.md §3b).
  */
 export async function generateReasoningTrace(
   input: TraceInput,
   ctx: CallContext = { purpose: 'trace_hedge', priority: 'cron' },
   opts: { upstreamProvenance?: ProvenanceEntry[] } = {},
-) {
+): Promise<{ trace: ReasoningTrace; tracePayload: TraceDocV2 }> {
   const edge = calculateEdge(input.probabilityEstimate, input.marketProbability);
   // A forecast-driven decision (#75) already has a calibrated interval; the
   // jackknife over sourcesUsed would only echo the signals' rawValues.
@@ -51,28 +61,42 @@ export async function generateReasoningTrace(
   // canonicalJson would encode differently from the contracts repo.
   const provenance = buildTraceProvenance([...(opts.upstreamProvenance ?? []), hedgeConditions.provenance]);
 
-  const traceDoc: TraceDocV1 = buildTraceDoc({
-    traceId,
-    agentType: input.agentType,
-    decisionType: input.decisionType,
-    action: input.decisionType.toLowerCase(),
-    backendMarketId: input.marketId,
-    onChainMarketId,
-    probabilityEstimate: input.probabilityEstimate,
-    marketProbability: input.marketProbability,
-    edge,
-    confidenceInterval:  ci,
-    betFraction:         input.betFraction,
-    betSizeUsdc:         input.betSizeUsdc,
-    correlation:         input.correlation,
-    seedPolicy:          input.seedPolicy,
-    forecast:            input.forecast,
-    sizing:              input.sizing,
-    hedgeConditions:     hedgeConditions.conditions,
-    provenance,
-    agentWallet:         input.agentWallet,
-    timestamp:           clockNow().toISOString(),
-  };
+  // Allocated up front so the row id and doc.traceId always agree.
+  const traceId = randomUUID();
+  const market = await prisma.market.findUnique({
+    where: { id: input.marketId },
+    select: { onChainMarketId: true },
+  });
+
+  let traceDoc: TraceDocV2;
+  try {
+    traceDoc = buildTraceDocV2({
+      traceId,
+      agentType:           input.agentType,
+      decisionType:        input.decisionType,
+      action:              input.decisionType.toLowerCase(),
+      backendMarketId:     input.marketId,
+      onChainMarketId:     market?.onChainMarketId ?? null,
+      probabilityEstimate: input.probabilityEstimate,
+      marketProbability:   input.marketProbability,
+      edge,
+      confidenceInterval:  ci,
+      sourcesUsed:         input.sourcesUsed,
+      betFraction:         input.betFraction ?? null,
+      betSizeUsdc:         input.betSizeUsdc ?? null,
+      hedgeConditions:     hedgeConditions.conditions,
+      agentWallet:         input.agentWallet ?? null,
+      provenance,
+      forecast:            input.forecast ?? null,
+      sizing:              input.sizing ?? null,
+      seedPolicy:          input.seedPolicy ?? null,
+      correlation:         input.correlation ?? null,
+      corroboration:       input.corroboration ?? null,
+    }, clockNow());
+  } catch (err) {
+    const issues = err instanceof ZodError ? err.issues : [{ message: err instanceof Error ? err.message : String(err) }];
+    throw new AppError(422, 'TRACE_DOC_INVALID', 'Reasoning trace document failed schema validation', { issues });
+  }
 
   // The free preview names the source and headline only; links and ids are
   // part of the paid trace (#73).
@@ -82,14 +106,15 @@ export async function generateReasoningTrace(
     signal: s.signal,
   }));
 
-  const trace = await prisma.reasoningTrace.upsert({
-    where: { id: traceId },
-    create: {
-      id: traceId,
+  // create, not upsert: a collision on a fresh UUID must fail loudly rather
+  // than hand back a stale row.
+  const trace = await prisma.reasoningTrace.create({
+    data: {
+      id:                  traceId,
       marketId:            input.marketId,
       agentType:           input.agentType,
       decisionType:        input.decisionType,
-      sourcesUsed:         input.sourcesUsed as any,
+      sourcesUsed:         input.sourcesUsed as Prisma.InputJsonValue,
       probabilityEstimate: input.probabilityEstimate,
       rawProbabilityEstimate: input.rawProbabilityEstimate ?? input.probabilityEstimate,
       marketProbability:   input.marketProbability,
@@ -97,14 +122,13 @@ export async function generateReasoningTrace(
       confidenceInterval:  ci as Prisma.InputJsonValue,
       betFraction:         input.betFraction ?? null,
       betSizeUsdc:         input.betSizeUsdc ?? null,
-      hedgeConditions:     hedgeConditions.conditions as any,
+      hedgeConditions:     hedgeConditions.conditions as Prisma.InputJsonValue,
       provenance:          provenance as unknown as Prisma.InputJsonValue,
       agentWallet:         input.agentWallet,
-      previewSources:      previewSources as any,
+      previewSources:      previewSources as Prisma.InputJsonValue,
       verified:            false,
       isPublic:            false,
     },
-    update: {},
   });
 
   logger.info({ traceId: trace.id, edge, marketId: input.marketId }, 'Reasoning trace generated');

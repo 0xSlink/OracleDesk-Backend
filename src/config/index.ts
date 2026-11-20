@@ -685,6 +685,21 @@ export const envObjectSchema = z
     TRACE_AUDIT_CRON: z.string().default('40 */2 * * *'),
     TRACE_AUDIT_RECHECK_HOURS: z.string().default('168').transform(Number),
     TRACE_AUDIT_MAX_RPC: z.string().default('500').transform(Number),
+    // ── Cross-source corroboration (#228) ─────────────────────────────────
+    // off: no check. observe: log the verdict and continue. enforce: an
+    // uncorroborated proposal creates nothing (no row, pin, seed or trace).
+    CORROBORATION_MODE: z.enum(['off', 'observe', 'enforce']).default('observe'),
+    // Independent units (clusters merged by domain and rewrite distance) needed.
+    CORROBORATION_MIN_PUBLISHERS: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(20)),
+    // Coverage must be published within this many hours before the cycle.
+    CORROBORATION_WINDOW_HOURS: z.string().default('72').transform(Number).pipe(z.number().int().min(1).max(24 * 30)),
+    // SimHash distance under which two clusters are one rewritten story.
+    CORROBORATION_SIMHASH_REWRITE: z.string().default('10').transform(Number).pipe(z.number().int().min(0).max(64)),
+    // Store rows considered per check, newest first.
+    CORROBORATION_MAX_CANDIDATES: z.string().default('500').transform(Number).pipe(z.number().int().min(1).max(10_000)),
+    // Live mode requires enforce unless this is set.
+    CORROBORATION_ALLOW_OBSERVE_LIVE: boolDefault('false'),
+
     TRACE_AUDIT_MAX_FETCHES: z.string().default('100').transform(Number),
     TRACE_AUDIT_MAX_BYTES: z.string().default('2097152').transform(Number),
 
@@ -913,6 +928,13 @@ export const envSchema = envObjectSchema
     }
     if (env.URI_REQUEST_SIGNING_SECRET) {
       if (!StrKey.isValidEd25519SecretSeed(env.URI_REQUEST_SIGNING_SECRET)) {
+      if (env.CORROBORATION_MODE !== 'enforce' && !env.CORROBORATION_ALLOW_OBSERVE_LIVE) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['CORROBORATION_MODE'],
+          message: 'must be enforce when CHAIN_EXECUTION_MODE=live (or set CORROBORATION_ALLOW_OBSERVE_LIVE=true)',
+        });
+      }
         ctx.addIssue({ code: 'custom', path: ['URI_REQUEST_SIGNING_SECRET'], message: 'must be a Stellar secret seed (S…)' });
       }
       if (env.URI_REQUEST_SIGNING_SECRET === env.AUTH_SIGNING_SECRET) {
