@@ -280,7 +280,7 @@ export function prodTraderEnv(): TraderEnv {
           method:     order.correlation.method ?? 'matrix',
           snapshotId: order.correlation.snapshotId ?? null,
         },
-      }, { upstreamProvenance: forecastProvenance });
+      }, undefined, { upstreamProvenance: forecastProvenance });
 
       // Execute trade (Never abort between chain write and DB update)
       const result = await executeTrade({

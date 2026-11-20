@@ -401,7 +401,8 @@ const STEPS: Partial<Record<GenerationRunState, StepFn>> = {
     return {
       outputs: {
         traceId: trace.id,
-        tracePayload: jsonSafe({ ...tracePayload, onChainMarketId: ctx.outputs.onChainMarketId ?? null }),
+        // The validated document, unchanged (#227); publish_trace carries the market id.
+        tracePayload: jsonSafe(tracePayload),
       },
       next: 'TRACE_PERSISTED',
     };

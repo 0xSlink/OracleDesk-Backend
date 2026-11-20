@@ -27,6 +27,7 @@ import { effectiveMode, specCompatReport } from '../services/stellar/spec-compat
 import { getFeeOracle } from '../services/stellar/fees';
 import { getLlmUsage } from '../lib/llm-budget';
 import { getCronStatus } from '../cron/registry';
+import { MAX_SILENCE_MINUTES, acknowledgeIncident, listIncidents, silenceIncident } from '../services/ops-alerts/incidents';
 import { getReplicationSummary } from '../jobs/ipfs-replication.job';
 import {
   ensureSigningKeyRegistered,
@@ -491,143 +492,40 @@ export async function voidDisputeTx(req: Request, res: Response): Promise<void> 
   sendSuccess(res, await buildGuardianTx(disputeId(req), 'guardian_void_market'));
 }
 
-function decisionQueryString(value: unknown, name: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'string' || value.length === 0 || value.length > 200) {
-    throw new AppError(400, 'VALIDATION_ERROR', `${name} must be a non-empty string of at most 200 characters`);
-  }
-  return value;
+// ─── Operational alerts (#226) ───────────────────────────────────────────────
+
+const alertListSchema = z.object({
+  id: z.string().uuid().optional(),
+  state: z.enum(['PENDING', 'OPEN', 'RESOLVED']).optional(),
+  severity: z.enum(['INFO', 'WARN', 'CRITICAL']).optional(),
+});
+const alertIdSchema = z.object({ id: z.string().uuid() });
+const silenceSchema = z.object({ untilMinutes: z.number().int().min(1).max(MAX_SILENCE_MINUTES) }).strict();
+
+function alertId(req: Request): string {
+  const parsed = alertIdSchema.safeParse(req.params);
+  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert id', parsed.error.flatten().fieldErrors as any);
+  return parsed.data.id;
 }
 
-function decisionQueryEnum<T extends string>(
-  value: unknown,
-  name: string,
-  allowed: readonly T[],
-): T | undefined {
-  const raw = decisionQueryString(value, name);
-  if (raw === undefined) return undefined;
-  if (!allowed.includes(raw as T)) {
-    throw new AppError(400, 'VALIDATION_ERROR', `${name} must be one of: ${allowed.join(', ')}`);
-  }
-  return raw as T;
-}
-
-/** GET /admin/agent-decisions: filter and paginate individual decisions. */
-export async function getAgentDecisions(req: Request, res: Response): Promise<void> {
+/** GET /admin/alerts?state=&severity=&page=&limit= */
+export async function getAlerts(req: Request, res: Response): Promise<void> {
+  const parsed = alertListSchema.safeParse(req.query);
+  if (!parsed.success) throw new AppError(400, 'VALIDATION_ERROR', 'Invalid alert filters', parsed.error.flatten().fieldErrors as any);
   const { page, limit, skip } = parsePagination(req.query as any);
-  const cycleId = decisionQueryString(req.query.cycleId, 'cycleId');
-  const marketId = decisionQueryString(req.query.marketId, 'marketId');
-  const agentType = decisionQueryEnum(req.query.agentType, 'agentType', Object.values(AgentType));
-  const kind = decisionQueryEnum(req.query.kind, 'kind', Object.values(AgentDecisionKind));
-  const reasonCode = decisionQueryEnum(req.query.reasonCode, 'reasonCode', Object.values(AgentDecisionReason));
-  const where = {
-    ...(cycleId ? { cycleId } : {}),
-    ...(marketId ? { marketId } : {}),
-    ...(agentType ? { agentType } : {}),
-    ...(kind ? { kind } : {}),
-    ...(reasonCode ? { reasonCode } : {}),
-  };
-  const [rows, total] = await Promise.all([
-    prisma.agentDecision.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
-    prisma.agentDecision.count({ where }),
-  ]);
+  const { rows, total } = await listIncidents({ ...parsed.data, skip, take: limit });
   sendSuccess(res, rows, 200, buildPaginationMeta(page, limit, total) as any);
 }
 
-/** GET /admin/agent-decisions/cycles: recent cycle funnels grouped by agent. */
-export async function getAgentDecisionCycles(req: Request, res: Response): Promise<void> {
-  const { page, limit, skip } = parsePagination(req.query as any);
-  const [cycles, totalRows] = await Promise.all([
-    prisma.agentDecision.groupBy({
-      by: ['cycleId'],
-      _count: { _all: true },
-      _min: { createdAt: true },
-      _max: { createdAt: true },
-      orderBy: [{ _max: { createdAt: 'desc' } }, { cycleId: 'desc' }],
-      skip,
-      take: limit,
-    }),
-    prisma.$queryRaw<Array<{ total: string }>>`
-      SELECT COUNT(DISTINCT "cycleId")::text AS total FROM "agent_decisions"
-    `,
-  ]);
-  const total = Number(totalRows[0]?.total);
-  if (!Number.isSafeInteger(total) || total < 0) {
-    throw new Error('Agent decision cycle count is outside the supported pagination range');
-  }
-  const agents = cycles.length === 0
-    ? []
-    : await prisma.agentDecision.groupBy({
-        by: ['cycleId', 'agentType'],
-        where: { cycleId: { in: cycles.map((cycle) => cycle.cycleId) } },
-        _count: { _all: true },
-      });
-  const agentsByCycle = new Map<string, Array<{ agentType: AgentType; count: number }>>();
-  for (const row of agents) {
-    const list = agentsByCycle.get(row.cycleId) ?? [];
-    list.push({ agentType: row.agentType, count: row._count._all });
-    agentsByCycle.set(row.cycleId, list);
-  }
-  sendSuccess(
-    res,
-    cycles.map((cycle) => ({ ...cycle, agents: agentsByCycle.get(cycle.cycleId) ?? [] })),
-    200,
-    buildPaginationMeta(page, limit, total) as any,
-  );
+/** POST /admin/alerts/:id/ack — stops escalation for the current episode. */
+export async function ackAlert(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await acknowledgeIncident(alertId(req), actor(req)));
 }
 
-/** GET /admin/agent-decisions/cycles/:cycleId: per-cycle decision funnel. */
-export async function getAgentDecisionCycleFunnel(req: Request, res: Response): Promise<void> {
-  const cycleId = decisionQueryString(req.params.cycleId, 'cycleId');
-  if (!cycleId) throw new AppError(400, 'VALIDATION_ERROR', 'cycleId is required');
-
-  const rows = await prisma.agentDecision.findMany({
-    where: { cycleId },
-    select: {
-      agentType: true,
-      kind: true,
-      reasonCode: true,
-      marketId: true,
-      traceId: true,
-      tradeId: true,
-      createdAt: true,
-    },
-    orderBy: { createdAt: 'asc' },
-  });
-  const steps = new Map<string, {
-    agentType: AgentType;
-    kind: AgentDecisionKind;
-    reasonCode: AgentDecisionReason;
-    count: number;
-    marketIds: Set<string>;
-  }>();
-  const marketCounts = new Map<string, number>();
-  for (const row of rows) {
-    const key = `${row.agentType}:${row.kind}:${row.reasonCode}`;
-    const step = steps.get(key) ?? {
-      agentType: row.agentType,
-      kind: row.kind,
-      reasonCode: row.reasonCode,
-      count: 0,
-      marketIds: new Set<string>(),
-    };
-    step.count++;
-    if (row.marketId) {
-      step.marketIds.add(row.marketId);
-      marketCounts.set(row.marketId, (marketCounts.get(row.marketId) ?? 0) + 1);
-    }
-    steps.set(key, step);
-  }
-
-  sendSuccess(res, {
-    cycleId,
-    totalDecisions: rows.length,
-    linkedTraces: rows.filter((row) => row.traceId !== null).length,
-    linkedTrades: rows.filter((row) => row.tradeId !== null).length,
-    steps: [...steps.values()].map(({ marketIds, ...step }) => ({
-      ...step,
-      marketCount: marketIds.size,
-    })),
-    markets: [...marketCounts].map(([marketId, decisionCount]) => ({ marketId, decisionCount })),
-  });
+/** POST /admin/alerts/:id/silence { untilMinutes ≤ 1440 } */
+export async function silenceAlert(req: Request, res: Response): Promise<void> {
+  const id = alertId(req);
+  const body = silenceSchema.safeParse(req.body ?? {});
+  if (!body.success) throw new AppError(400, 'VALIDATION_ERROR', 'untilMinutes must be an integer from 1 to 1440', body.error.flatten().fieldErrors as any);
+  sendSuccess(res, await silenceIncident(id, body.data.untilMinutes));
 }

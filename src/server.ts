@@ -18,6 +18,7 @@ import { bootstrapAdminRbac, isAdminToken } from './middlewares/auth.middleware'
 import { startTraceAuditCron } from './cron/trace-audit.cron';
 import { startTracePublicationCron } from './cron/trace-publication.cron';
 import { startPaymentIntentCron } from './cron/payment-intent.cron';
+import { startOpsAlertCron } from './cron/ops-alerts.cron';
 import { startEventListener } from './services/indexer.service';
 import { gateDecision, runSpecCompatGate } from './services/stellar/spec-compat';
 import { startOutboxWorker } from './services/stellar/outbox';
@@ -45,6 +46,7 @@ let stopSecretRefresh: (() => void) | null = null;
 let throttle: SocketThrottle | null = null;
 let stopSlowGuard: (() => void) | null = null;
 let stopOutboxWorker: (() => void) | null = null;
+let stopOpsAlerts: (() => void) | null = null;
 
 const rejectionLogState = new Map<string, { count: number; lastLog: number }>();
 function logSocketRejection(reason: string, details: Record<string, unknown> = {}): void {
@@ -286,8 +288,10 @@ async function bootstrap(): Promise<void> {
   // 3. Index Stellar events (resumes from the stored ledger cursor). The
   // indexer publishes to the bus; api pods fan out to connected sockets.
   if (rolePlan.startIndexer) {
+    // Sockets are fed by the bus fan-out (#93), not from here. The #96 throttle
+    // used to sit on this callback, but PublishMeta carries no `live` flag, so
+    // it dropped every event as historical; it was never reaching clients.
     stopEventListener = startEventListener(async (type, payload, meta) => {
-      throttle?.handle(type, payload, meta);
       await bus.publish({ ...meta, type, payload });
     });
   }
@@ -307,6 +311,8 @@ async function bootstrap(): Promise<void> {
     });
     // Price-mode reveal + resolve loop (#90).
     startPriceResolutionCron();
+    // Operational alerts (#226): one evaluator per tick via an advisory lock.
+    stopOpsAlerts = startOpsAlertCron();
   }
 
   // Minimal health probe listener for non-API roles (indexer / worker).
@@ -324,6 +330,7 @@ async function bootstrap(): Promise<void> {
   onShutdown('stop-producers', 'outbox-worker', async () => { stopOutboxWorker?.(); }, 3_000);
   onShutdown('stop-producers', 'fanout', async () => { if (stopFanout) await stopFanout(); }, 5_000);
   onShutdown('stop-producers', 'secret-refresh', async () => { stopSecretRefresh?.(); }, 1_000);
+  onShutdown('stop-producers', 'ops-alerts', async () => { stopOpsAlerts?.(); }, 1_000);
   onShutdown('release-leases', 'redis-waiters', async () => { await releaseAllWaiters(); }, 2_000);
   onShutdown('close-transports', 'prisma', async () => { await prisma.$disconnect(); }, 5_000);
   onShutdown('close-transports', 'redis', async () => { await closeRedis(); }, 3_000);

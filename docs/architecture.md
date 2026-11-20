@@ -519,6 +519,60 @@ indexer ──publish──▶ Redis Stream (oracledesk:events) ──▶ one fa
 
 The indexer and the reconciler (below) both write `markets.chainSyncedLedger`, the ledger a row's chain-derived state reflects. A price or status write applies only when it is not older than that, so the two can never overwrite each other with stale information, and `applyMarketFinality` (`market-finality.ts`) is the one place a market becomes `RESOLVED`/`CANCELLED` and its positions close.
 
+## Operational alerts (#226)
+
+`src/services/alerts.service.ts` serves two payloads through the same sinks
+(HMAC-signed JSON webhook, Slack): dispute alerts (`oracledesk.dispute_alert`,
+byte-for-byte as in #92, keys `reviewId:level:sink`, once per level) and
+operational incidents (`oracledesk.ops_alert`).
+
+**Subjects** (`src/services/ops-alerts/conditions.ts`), all read from Postgres
+so any instance sees the cluster:
+
+| subjectType | subjectKey | Bad when | Severity |
+|---|---|---|---|
+| `agent_pause` | `<scope>:<source>` | a scope's own pause is active | `failure_breaker`, `drawdown` CRITICAL; `chain_paused` WARN; `operator` INFO, off unless `ALERT_OPERATOR_PAUSES` |
+| `outbox_stuck` | `outbox:<kind>` | SUBMITTED/PENDING rows past `maxTime` or older than `ALERT_OUTBOX_STUCK_MS` | CRITICAL past maxTime, else WARN |
+| `outbox_unhandled` | `outbox:<kind>` | terminal rows with `handledAt IS NULL` older than `ALERT_UNHANDLED_MS` | CRITICAL when a SUCCESS row is unhandled, else WARN |
+| `cron_failing` | `cron:<job>` | `cron_runs.failureStreak ≥ ALERT_CRON_FAILURE_STREAK` | WARN; CRITICAL at twice the streak |
+| `reconcile_drift` | `drift:<class>` | the latest finished reconcile run has REPORTED drift of that class | WARN |
+
+Outbox rows are grouped by kind: a backlog of 50 is one incident, never 50.
+`recordCronRun` keeps its in-memory map and also upserts `cron_runs`
+(fire-and-forget, atomic streak increment), so failure streaks are cluster-wide.
+
+**Engine** (`src/services/ops-alerts/engine.ts`). Each tick runs under the
+`ops-alerts` advisory lock; an instance without it returns at once. Incidents
+(`alert_incidents`, unique on `(subjectType, subjectKey)`) move
+PENDING → OPEN after `ALERT_OPEN_AFTER` bad evaluations in a row, and OPEN →
+RESOLVED after `ALERT_RESOLVE_AFTER` good ones, so an operator resume does not
+resolve instantly and a breaker re-pause is absorbed. Each open starts a new
+`episode` and clears the acknowledgement. A subject missing from a successful
+evaluator's output is good; an evaluator that throws leaves its incidents as
+they are. Unacknowledged CRITICAL incidents re-notify (`escalate`, numbered)
+every `ALERT_ESCALATE_EVERY_MS`. `silencedUntil` suppresses every notification,
+and a subject's open is sent at most once per `ALERT_MIN_REOPEN_MS`.
+Notifications are collected in the lock transaction and sent after it commits.
+Their keys `inc:<incidentId>:<episode>:<open|escalate-N|resolve>:<severity>:<sink>`
+in `alert_deliveries` make a retry safe.
+
+**Routing.** `ALERT_ROUTES_JSON` maps severities to sink names: `webhook` matches
+every webhook sink, `slack` the Slack sink, or an exact `webhook-<tag>`. Without
+it, WARN and CRITICAL go to every sink and INFO to none.
+
+**Scheduling.** `startOpsAlertCron()` runs on `ALERT_EVAL_CRON` (every minute) on
+worker roles, is recorded as the `ops-alerts` cron job, and is stopped by the
+shutdown coordinator. It does not depend on the dispute cron. `pauseAgent`
+notifies `onAgentPaused` listeners after commit, and the cron's listener queues
+one debounced (2 s) burst of `ALERT_OPEN_AFTER` evaluations, 2 s apart. The
+hysteresis still needs that many consecutive bad readings, but a breaker trip
+opens its incident within seconds rather than after `ALERT_OPEN_AFTER` cron
+periods. Bursts of pauses (several scopes at once) coalesce into one.
+
+**Admin.** `GET /admin/alerts` (`admin.read`), `POST /admin/alerts/:id/ack` and
+`POST /admin/alerts/:id/silence` (`alerts.manage`, audited by
+`requirePermission`). See docs/api.md.
+
 ## Market lifecycle reconciler (#83)
 
 `market-reconciler.service.ts` runs every ten minutes (`3,13,…,53`, `RECONCILE_ENABLED`) on one instance (a Postgres advisory lock held by a transaction, so a pooled connection cannot leak it). It reads `market_core.get_market` with the ledger the simulation ran against, for linked markets in bounded batches (`RECONCILE_MAX_MARKETS`, `RECONCILE_CONCURRENCY`, `RECONCILE_MAX_RPC_CALLS`; open markets first, then never/least-recently reconciled), and classifies each difference with the pure `classifyDrift`:
@@ -931,6 +985,67 @@ Rejections write `PROPOSAL_REJECTED` and quarantines `SIGNALS_QUARANTINED` to
 raw titles. `tests/fixtures/injection/*.json` holds 28 attack and 18 benign cases
 with recorded model outputs; `tests/llm-injection.test.ts` replays them through
 `generateMarketQuestion` (model replaced by `setLlmJsonCaller`).
+
+## Cross-source corroboration (#228)
+
+The injection guard above checks that a proposal cites signals that were really
+sent. It cannot tell a real story from a planted, mistaken or satirical one: one
+article in NewsAPI or GDELT is enough to pass it, and the market that follows
+gets treasury seed liquidity, a pinned question document and an on-chain trace
+that cites the lone article. The corroboration gate sits between resolvability
+(step 2b/2c) and the dedup reservation in `runMarketMakerCycle` (step 2d).
+
+**Policy** (`checkCorroboration` in `src/services/llm-guard.service.ts`, pure and
+deterministic; `assessCorroboration` in `src/services/corroboration.service.ts`
+does the one signal-store read per cycle):
+
+1. **Claim matching.** Entities come from `extractEntities` run on the
+   *sanitised* question. A candidate store row matches when its title and
+   summary cover every gazetteer entity of the question (or at least two
+   `NAME:` entities when there are none), share at least two meaningful tokens
+   with it, and were published within `CORROBORATION_WINDOW_HOURS` (72) before
+   now. The window is wider than the aggregator's 24 h on purpose. The
+   grounding signals are candidates too. FRED rows never match: they have no
+   URL and cluster per series.
+2. **Independence.** Matching rows are grouped by near-duplicate cluster
+   (`clusterId`, else the row). Each group's publishers are registrable domains
+   (`src/lib/domains.ts`: URL host without `www.`, folded to eTLD+1 with a small
+   multi-label suffix table, falling back to the lower-cased publisher only
+   when there is no URL, since GDELT reports a domain and NewsAPI a display
+   name). Groups that share a domain, or whose texts are within
+   `CORROBORATION_SIMHASH_REWRITE` (10, looser than clustering) bits of each
+   other, merge into one unit (union-find, so candidate order never matters).
+   `CORROBORATED` needs `CORROBORATION_MIN_PUBLISHERS` (2) units spanning two
+   domains. Twelve syndicated copies under twelve mastheads are one cluster and
+   one unit. A URL count is never used.
+3. **Authoritative exemption.** `AUTHORITATIVE` when FRED resolves the question
+   and a grounding FRED signal is the series that measures it (`fredSeriesFor`,
+   the resolvability FRED table, with FEDFUNDS accepted for fed-funds
+   questions), or when FRED/ECB resolves a question whose extracted deadline is
+   exactly a scheduled FOMC/ECB announcement (`meetingAt`) and at least one
+   news candidate matches. There is no category-wide bypass. "Will the Fed cut
+   by December 31" names no meeting and needs ordinary corroboration.
+
+**Modes** (`CORROBORATION_MODE`): `off`; `observe` (default for the first
+release) logs `PROPOSAL_UNCORROBORATED` and creates the market anyway, and
+fails open if the store read fails; `enforce` returns before the reservation,
+so an uncorroborated proposal produces no DB row, IPFS pin, seed or trace, and
+a failed check fails closed. Config validation requires `enforce` in live mode
+unless `CORROBORATION_ALLOW_OBSERVE_LIVE=true`.
+
+**Recording.** `Market.corroboration` holds `{ kind, corroborators: [{ signalId,
+clusterId, domain, source, publishedAt }], policy, checkedAt }`. The creation
+trace's `sourcesUsed` is the grounding evidence plus the corroborating rows
+(deduped by `signalId`, so retention keeps them), and TraceDocV2 carries
+`corroboration: { kind, units, domains }`. `PROPOSAL_UNCORROBORATED` logs carry
+unit and domain counts, the domains, and `sha256(signalId)` hashes, never
+signal text.
+
+**Residual risk.** An attacker who publishes two *different* fabricated texts on
+two domains they control is counted as two units: rewrite-distance merging
+catches near-copies only. The logged domains let operators find and blocklist
+such pairs. Credibility weighting of publishers is out of scope here and belongs
+to source-weight learning.
 
 ## LLM budgets and shared guards (#71)
 

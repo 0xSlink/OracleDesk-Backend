@@ -1059,18 +1059,33 @@ Body `{ reason?: string }`. Clears only the named row: resuming `TRADER` does no
 clear an `ALL` pause. Every pause, resume and automatic expiry writes an
 `agent_control_events` row (`before`, `after`, `actor`, `source`).
 
-#### Agent decision records (admin)
+### Operational alerts (admin auth, #226)
 
-`GET /admin/agent-decisions` supports `cycleId`, `marketId`, `agentType`,
-`kind`, and `reasonCode` filters with `page`/`limit` pagination. Each decision
-includes its typed kind/reason, input digest and inputs, optional sizing and
-forecast references, outcome, and links to the market, trace, trade, or
-position that resulted.
+#### `GET /admin/alerts?id=&state=&severity=&page=&limit=` (`admin.read`)
 
-`GET /admin/agent-decisions/cycles` returns paginated cycle summaries with
-decision counts by agent and first/last timestamps.
-`GET /admin/agent-decisions/cycles/:cycleId` returns a per-cycle funnel grouped
-by agent, kind, and reason, including linked trace/trade counts and markets.
+Incidents, most recently updated first, with pagination meta. `state` is
+`PENDING | OPEN | RESOLVED`, `severity` `INFO | WARN | CRITICAL`, `id` one
+incident (the `adminUrl` in every notification links here). Each row:
+`{ id, subjectType, subjectKey, severity, state, episode, summary, detail,
+badStreak, goodStreak, openedAt, resolvedAt, ackedAt, ackedBy, silencedUntil,
+lastNotifiedAt, escalations }`. `400 VALIDATION_ERROR` for an unknown filter value.
+
+#### `POST /admin/alerts/:id/ack` (`alerts.manage`, audited)
+
+Acknowledges the current episode and stops its escalation. A later episode
+starts unacknowledged. `409 ALERT_NOT_OPEN` unless the incident is OPEN,
+`404 ALERT_NOT_FOUND`.
+
+#### `POST /admin/alerts/:id/silence` (`alerts.manage`, audited)
+
+Body `{ untilMinutes: 1..1440 }`. No notification (open, escalation or resolve)
+is sent for the incident until then; state transitions continue.
+
+Notification payloads (generic webhook, signed like dispute alerts):
+`{ type: "oracledesk.ops_alert", sentAt, alert: { kind: "ops", level, severity,
+subjectType, subjectKey, summary, detail, state, incidentId, episode,
+notification: "open" | "escalate" | "resolve", adminUrl } }`. Dispute alerts
+keep `type: "oracledesk.dispute_alert"` and their payload unchanged.
 
 #### `GET /admin/reconciliation/runs?limit=` (admin)
 
