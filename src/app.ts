@@ -93,7 +93,10 @@ app.use(compression());
 app.use(express.json({ limit: '1mb', verify: captureRawBody }));
 // Stream-based body parsing can resume handlers outside the request's async
 // context; re-enter it so everything downstream stays correlated.
-app.use((_req, res, next) => runInContext(res.locals.requestContext, next));
+app.use((_req, res, next) => {
+  const ctx = res.locals.requestContext;
+  return ctx ? runInContext(ctx, next) : next();
+});
 
 // ─── HTTP Logging ───
 // Paths only: the route template, never the query string or referrer.

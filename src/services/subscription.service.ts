@@ -11,7 +11,7 @@ import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { config } from '../config';
 import { CONTRACTS, PAYMENTS_RECIPIENT } from '../config/contracts';
-import { decimalToBigint, formatUsdc, toDisplayUsdc, usdcFromNumber } from '../lib/amounts';
+import { decimalToBigint, formatUsdc, toDisplayUsdc } from '../lib/amounts';
 import { verifyUsdcTransfer } from './payment-verification.service';
 import { AppError } from '../middlewares/error.middleware';
 import type { SubscriptionAccess } from '../types';
@@ -23,6 +23,158 @@ import { discoverTracePrice } from './x402-discovery.service';
 
 /** Daily pass price in 7-decimal USDC base units (DAILY_PASS_PRICE_RAW). */
 export const DAILY_PASS_PRICE_RAW = BigInt(config.DAILY_PASS_PRICE_RAW);
+
+/**
+ * The Float display mirrors (#224 phase B). Returns `fields` only while
+ * PAYMENT_FLOAT_WRITES is on; otherwise the columns' DB default of 0 applies.
+ * No reader uses the floats, so a 0 written by a newer instance is harmless
+ * to an older one.
+ */
+export function floatMirror<T extends Record<string, number>>(fields: T): Partial<T> {
+  return config.PAYMENT_FLOAT_WRITES ? fields : {};
+}
+
+type RawLike = { toFixed(): string } | string | bigint;
+
+function rawString(value: RawLike | null | undefined): string | null {
+  return value == null ? null : decimalToBigint(value).toString();
+}
+
+function displayOf(value: RawLike | null | undefined): string | null {
+  return value == null ? null : formatUsdc(decimalToBigint(value));
+}
+
+export interface SubscriptionDto {
+  id: string;
+  userId: string;
+  traceId: string | null;
+  type: SubscriptionType;
+  status: SubscriptionStatus;
+  /** Base units; null only for a legacy row the backfill has not reached. */
+  amountPaidRaw: string | null;
+  amountDisplay: string | null;
+  currency: SettlementCurrency;
+  txHash: string | null;
+  purchaseLedger: number | null;
+  startsAt: Date | null;
+  endsAt: Date | null;
+  expiresAt: Date | null;
+  paymentIntentId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * API shape of a subscription (#224). Fields are listed explicitly so the
+ * Float amountPaid (and any future column) never reaches a client.
+ */
+export function toSubscriptionDto(sub: any): SubscriptionDto {
+  return {
+    id: sub.id,
+    userId: sub.userId,
+    traceId: sub.traceId ?? null,
+    type: sub.type,
+    status: sub.status,
+    amountPaidRaw: rawString(sub.amountPaidRaw),
+    amountDisplay: displayOf(sub.amountPaidRaw),
+    currency: sub.currency,
+    txHash: sub.txHash ?? null,
+    purchaseLedger: sub.purchaseLedger ?? null,
+    startsAt: sub.startsAt ?? null,
+    endsAt: sub.endsAt ?? null,
+    expiresAt: sub.expiresAt ?? null,
+    paymentIntentId: sub.paymentIntentId ?? null,
+    createdAt: sub.createdAt,
+    updatedAt: sub.updatedAt,
+  };
+}
+
+export interface PaymentEventDto {
+  id: string;
+  userId: string;
+  txHash: string;
+  type: PaymentEventType;
+  /** Base units; null only for a legacy row the backfill has not reached. */
+  amountRaw: string | null;
+  amountDisplay: string | null;
+  fromAddress: string | null;
+  currency: SettlementCurrency;
+  status: PaymentEventStatus;
+  traceId: string | null;
+  ledger: number | null;
+  ledgerCloseTime: Date | null;
+  allowanceOverage: boolean;
+  allowanceOverageRaw: string | null;
+  paymentIntentId: string | null;
+  metadata: unknown;
+  createdAt: Date;
+  confirmedAt: Date | null;
+}
+
+/** API shape of a payment event (#224): raw amount and its display string only. */
+export function toPaymentEventDto(event: any): PaymentEventDto {
+  return {
+    id: event.id,
+    userId: event.userId,
+    txHash: event.txHash,
+    type: event.type,
+    amountRaw: rawString(event.amountRaw),
+    amountDisplay: displayOf(event.amountRaw),
+    fromAddress: event.fromAddress ?? null,
+    currency: event.currency,
+    status: event.status,
+    traceId: event.traceId ?? null,
+    ledger: event.ledger ?? null,
+    ledgerCloseTime: event.ledgerCloseTime ?? null,
+    allowanceOverage: Boolean(event.allowanceOverage),
+    allowanceOverageRaw: rawString(event.allowanceOverageRaw),
+    paymentIntentId: event.paymentIntentId ?? null,
+    metadata: event.metadata ?? null,
+    createdAt: event.createdAt,
+    confirmedAt: event.confirmedAt ?? null,
+  };
+}
+
+export interface AllowanceDto {
+  id: string;
+  userId: string;
+  dailyLimitRaw: string;
+  perTraceLimitRaw: string;
+  spentTodayRaw: string;
+  overageRaw: string;
+  dailyLimitDisplay: string;
+  perTraceLimitDisplay: string;
+  spentTodayDisplay: string;
+  overageDisplay: string;
+  windowStartedAt: Date;
+  currency: SettlementCurrency;
+  lastResetAt: Date;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** API shape of a spending allowance (#224): raw counters plus display strings. */
+export function toAllowanceDto(allowance: any): AllowanceDto {
+  return {
+    id: allowance.id,
+    userId: allowance.userId,
+    dailyLimitRaw: rawString(allowance.dailyLimitRaw)!,
+    perTraceLimitRaw: rawString(allowance.perTraceLimitRaw)!,
+    spentTodayRaw: rawString(allowance.spentTodayRaw)!,
+    overageRaw: rawString(allowance.overageRaw)!,
+    dailyLimitDisplay: displayOf(allowance.dailyLimitRaw)!,
+    perTraceLimitDisplay: displayOf(allowance.perTraceLimitRaw)!,
+    spentTodayDisplay: displayOf(allowance.spentTodayRaw)!,
+    overageDisplay: displayOf(allowance.overageRaw)!,
+    windowStartedAt: allowance.windowStartedAt,
+    currency: allowance.currency,
+    lastResetAt: allowance.lastResetAt,
+    isActive: allowance.isActive,
+    createdAt: allowance.createdAt,
+    updatedAt: allowance.updatedAt,
+  };
+}
 
 /**
  * Checks whether a user has access to a specific reasoning trace.
@@ -473,7 +625,8 @@ export async function settleVerifiedTransfer(
       traceId: traceId ?? null,
       type: type as SubscriptionType,
       status: granted ? SubscriptionStatus.ACTIVE : SubscriptionStatus.EXPIRED,
-      amountPaid: amount,
+      ...floatMirror({ amountPaid: toDisplayUsdc(amountRaw) }),
+      amountPaidRaw: amountRaw.toString(),
       currency: SettlementCurrency.USDC,
       txHash,
       purchaseLedger: transfer.ledger,
@@ -490,7 +643,7 @@ export async function settleVerifiedTransfer(
       traceId: traceId ?? null,
       txHash,
       type: type as PaymentEventType,
-      amount,
+      ...floatMirror({ amount: toDisplayUsdc(amountRaw) }),
       amountRaw: amountRaw.toString(),
       fromAddress: transfer.from,
       currency: SettlementCurrency.USDC,
@@ -750,47 +903,49 @@ export async function notifyExpiringPasses(windowMins = 60, now = new Date()): P
   return notified;
 }
 
+/** Largest value a NUMERIC(39,0) allowance column accepts here (i128 max). */
+const MAX_ALLOWANCE_RAW = 2n ** 127n - 1n;
+
+/**
+ * Sets the caller's spending approval from exact base units (#224). Callers
+ * parse decimal strings with parseUsdc; floats are never accepted here.
+ */
 export async function upsertSpendingAllowance(params: {
   userId: string;
-  dailyLimit: number;
-  perTraceLimit: number;
-  dailyLimitRaw?: string;
-  perTraceLimitRaw?: string;
+  dailyLimitRaw: bigint;
+  perTraceLimitRaw: bigint;
   currency?: string;
 }): Promise<any> {
-  const { userId, dailyLimit, perTraceLimit, currency = 'USDC' } = params;
+  const { userId, dailyLimitRaw, perTraceLimitRaw, currency = 'USDC' } = params;
 
-  if (dailyLimit <= 0 || perTraceLimit <= 0 || perTraceLimit > dailyLimit) {
+  if (dailyLimitRaw <= 0n || perTraceLimitRaw <= 0n || perTraceLimitRaw > dailyLimitRaw) {
     throw new AppError(400, 'INVALID_ALLOWANCE', 'perTraceLimit and dailyLimit must be positive, and perTraceLimit cannot exceed dailyLimit');
   }
-  let dailyRaw = params.dailyLimitRaw ? BigInt(params.dailyLimitRaw) : usdcFromNumber(dailyLimit);
-  let perTraceRaw = params.perTraceLimitRaw ? BigInt(params.perTraceLimitRaw) : usdcFromNumber(perTraceLimit);
-  if (dailyRaw <= 0n || perTraceRaw <= 0n || perTraceRaw > dailyRaw) {
-    throw new AppError(400, 'INVALID_ALLOWANCE', 'dailyLimitRaw must be positive and at least perTraceLimitRaw');
-  }
-  if (dailyRaw > (2n ** 127n - 1n)) {
+  if (dailyLimitRaw > MAX_ALLOWANCE_RAW) {
     throw new AppError(400, 'INVALID_ALLOWANCE', 'dailyLimitRaw is too large');
   }
 
   const now = new Date();
+  const mirrors = floatMirror({
+    dailyLimit: toDisplayUsdc(dailyLimitRaw),
+    perTraceLimit: toDisplayUsdc(perTraceLimitRaw),
+  });
   return prisma.spendingAllowance.upsert({
     where: { userId },
     create: {
       userId,
-      dailyLimit,
-      perTraceLimit,
-      dailyLimitRaw: dailyRaw.toString(),
-      perTraceLimitRaw: perTraceRaw.toString(),
+      ...mirrors,
+      dailyLimitRaw: dailyLimitRaw.toString(),
+      perTraceLimitRaw: perTraceLimitRaw.toString(),
       spentTodayRaw: '0',
       overageRaw: '0',
       windowStartedAt: utcDayStart(now),
       currency: currency as 'USDC',
     },
     update: {
-      dailyLimit,
-      perTraceLimit,
-      dailyLimitRaw: dailyRaw.toString(),
-      perTraceLimitRaw: perTraceRaw.toString(),
+      ...mirrors,
+      dailyLimitRaw: dailyLimitRaw.toString(),
+      perTraceLimitRaw: perTraceLimitRaw.toString(),
       currency: currency as 'USDC',
       isActive: true,
     },
@@ -820,10 +975,11 @@ export async function getSpendingAllowance(userId: string, now = new Date()): Pr
   };
 }
 
-export async function listPaymentEvents(userId: string): Promise<any[]> {
-  return prisma.paymentEvent.findMany({
+export async function listPaymentEvents(userId: string): Promise<PaymentEventDto[]> {
+  const events = await prisma.paymentEvent.findMany({
     where: { userId },
     orderBy: { createdAt: 'desc' },
     take: 100,
   });
+  return events.map(toPaymentEventDto);
 }

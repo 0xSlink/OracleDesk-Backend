@@ -30,6 +30,10 @@ export const reconcileRunSchema = z.object({
   maxMarkets: z.number().int().min(1).max(5000).optional(),
 });
 
+export const moneyAuditRunSchema = z.object({
+  dryRun: z.boolean().optional(),
+});
+
 export type AdminOpInput = z.infer<typeof adminOpSchema>;
 
 export const controlScopeSchema = z.enum(['ALL', 'MARKET_MAKER', 'TRADER']);

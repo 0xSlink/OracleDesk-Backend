@@ -415,6 +415,7 @@ test('recordPayment: grants a pass once per hash and never without verification'
     const sub = await recordPayment({ userId: 'u1', walletAddress: user, type: 'DAILY_PASS', txHash: HASH });
     assert.equal(sub.status, 'ACTIVE');
     assert.equal(sub.amountPaid, 0.5);
+    assert.equal(sub.amountPaidRaw, '5000000');
 
     // Same user, same hash: idempotent, returns the existing pass.
     const again = await recordPayment({ userId: 'u1', walletAddress: user, type: 'DAILY_PASS', txHash: HASH });

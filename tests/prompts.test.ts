@@ -212,7 +212,7 @@ test('errorClassOf maps failures to a bounded set', async () => {
 
 // ─── Services ────────────────────────────────────────────────────────────────
 const TRACE_INPUT = {
-  marketId: 'm1',
+  marketId: '66666666-6666-4666-8666-666666666666',
   agentType: 'TRADER' as const,
   decisionType: 'OPEN_POSITION',
   sourcesUsed: [{ source: 'FRED', weight: 0.9, signal: 'CPI', rawValue: 0.6 }],
@@ -227,10 +227,16 @@ const TRACE_INPUT = {
 
 async function withTraceDb<T>(fn: (rows: any[]) => Promise<T>): Promise<T> {
   const { prisma } = await import('../src/lib/prisma');
-  const original = prisma.reasoningTrace.create;
+  const original = { create: prisma.reasoningTrace.create, findUnique: prisma.market.findUnique };
   const rows: any[] = [];
-  (prisma.reasoningTrace.create as any) = async ({ data }: any) => { rows.push(data); return { id: 't1', ...data }; };
-  try { return await fn(rows); } finally { (prisma.reasoningTrace.create as any) = original; }
+  (prisma.reasoningTrace.create as any) = async ({ data }: any) => { rows.push(data); return { ...data }; };
+  (prisma.market.findUnique as any) = async () => null;
+  try {
+    return await fn(rows);
+  } finally {
+    (prisma.reasoningTrace.create as any) = original.create;
+    (prisma.market.findUnique as any) = original.findUnique;
+  }
 }
 
 test('hedge defaults record source=default, the prompt and no model', async () => {

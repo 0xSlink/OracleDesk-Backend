@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth, requirePermission, requireStepUp } from '../middlewares/auth.middleware';
 import {
+  ackAlert,
   ackDispute,
   addOperationSignature,
   cancelDisputeTx,
@@ -10,11 +11,13 @@ import {
   getAdminRoles,
   getAdmins,
   getAgentControls,
+  getAlerts,
   getReconciliationRun,
   getSpecCompat,
   getChainSigningKeys,
   registerChainSigningKey,
   retireChainSigningKey,
+  silenceAlert,
   getSystemStatus,
   getChainFeesReport,
   pauseAgentControl,
@@ -66,6 +69,9 @@ router.post('/treasury/operations/:id/submit', requirePermission('treasury.opera
 router.post('/treasury/operations/:id/record', requirePermission('treasury.operate'), requireStepUp, recordTreasuryOperation);
 router.post('/treasury/operations/:id/cancel', requirePermission('treasury.operate'), requireStepUp, cancelTreasuryOperation);
 router.get('/agents/controls', requirePermission('agents.manage'), getAgentControls);
+router.get('/agent-decisions', requirePermission('admin.read'), getAgentDecisions);
+router.get('/agent-decisions/cycles', requirePermission('admin.read'), getAgentDecisionCycles);
+router.get('/agent-decisions/cycles/:cycleId', requirePermission('admin.read'), getAgentDecisionCycleFunnel);
 router.post('/agents/:agent/pause', requirePermission('agents.manage'), pauseAgentControl);
 router.post('/agents/:agent/resume', requirePermission('agents.manage'), resumeAgentControl);
 router.get('/status', requirePermission('admin.read'), getSystemStatus);
@@ -79,6 +85,11 @@ router.post('/trace-audit/run', requirePermission('trace_audit.run'), triggerTra
 router.get('/reconciliation/runs', requirePermission('reconciliation.run'), listReconciliationRuns);
 router.get('/reconciliation/runs/:id', requirePermission('reconciliation.run'), getReconciliationRun);
 router.post('/reconciliation/run', requirePermission('reconciliation.run'), triggerReconciliationRun);
+// Money audit (#222): guarded only; acknowledging needs step-up.
+router.get('/money-audit/runs', requirePermission('reconciliation.run'), listMoneyAuditRuns);
+router.get('/money-audit/runs/:id/findings', requirePermission('reconciliation.run'), listMoneyAuditFindings);
+router.post('/money-audit/run', requirePermission('reconciliation.run'), triggerMoneyAuditRun);
+router.post('/money-audit/findings/:id/ack', requirePermission('reconciliation.run'), requireStepUp, ackMoneyAuditFinding);
 // Spec compatibility report from the boot gate (#34): read-only diagnostics.
 router.get('/chain/spec-compat', requirePermission('admin.read'), getSpecCompat);
 // Agent trace signing keys (#273): permission- and step-up-guarded only.
@@ -135,5 +146,20 @@ router.get('/generation-runs/:id', requirePermission('markets.generate'), getGen
 router.post('/generation-runs', requirePermission('markets.generate'), requireStepUp, startGenerationRun);
 router.post('/generation-runs/:id/cancel', requirePermission('markets.generate'), requireStepUp, cancelGenerationRun);
 router.post('/generation-runs/:id/retry', requirePermission('markets.generate'), requireStepUp, retryGenerationRun);
+
+// Learned source weight sets (#223). The service writes its own audit row in
+// the same transaction as each change, so these opt out of the request audit.
+import {
+  activateSourceWeightSet,
+  approveSourceWeightSet,
+  getSourceWeightSet,
+  listSourceWeightSets,
+  rollbackSourceWeightSet,
+} from '../controllers/admin.controller';
+router.get('/source-weights', requirePermission('admin.read'), listSourceWeightSets);
+router.post('/source-weights/rollback', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, rollbackSourceWeightSet);
+router.get('/source-weights/:id', requirePermission('admin.read'), getSourceWeightSet);
+router.post('/source-weights/:id/approve', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, approveSourceWeightSet);
+router.post('/source-weights/:id/activate', requirePermission('agents.weights.approve', { audit: false }), requireStepUp, activateSourceWeightSet);
 
 export default router;

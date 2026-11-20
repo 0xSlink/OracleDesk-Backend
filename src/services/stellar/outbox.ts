@@ -184,7 +184,7 @@ export type CompletionHandler = (row: ChainTransactionRow, outcome: CompletionOu
 const handlers = new Map<string, CompletionHandler>();
 
 /** Kinds that must have a handler; resolving one without is an error, never a skip. */
-const DOMAIN_KINDS = new Set(['market.create', 'trade.buy', 'trade.sell', 'trace.publish']);
+export const DOMAIN_KINDS: ReadonlySet<string> = new Set(['market.create', 'trade.buy', 'trade.sell', 'trace.publish']);
 
 /** Registers the idempotent completion handler for one kind (at module load). */
 export function registerHandler(kind: string, handler: CompletionHandler): void {

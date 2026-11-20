@@ -281,6 +281,10 @@ export const envObjectSchema = z
     // (see docs/api.md: that makes subscription revenue trading capital).
     PAYMENTS_RECIPIENT: optionalAddress,
     DAILY_PASS_PRICE_RAW: z.string().regex(/^\d+$/, 'must be an integer in 7-decimal base units').default('5000000'),
+    // #224 phase B: false stops writing the Float display mirrors on payments,
+    // subscriptions and allowances (DB defaults of 0 apply). Removed together
+    // with the columns by the pending contract migration.
+    PAYMENT_FLOAT_WRITES: boolDefault('true'),
 
     // ── x402 daily pass (#61) ─────────────────────────────────────────────
     // The facilitator that verifies and settles x402 payments on Stellar.
@@ -488,6 +492,38 @@ export const envObjectSchema = z
     // HMAC-SHA256 key for the X-OracleDesk-Signature header on generic webhooks.
     ALERT_WEBHOOK_SECRET: optionalString,
 
+    // ── Operational alerts (#226) ─────────────────────────────────────────
+    // Evaluation schedule (one leader per tick via an advisory lock).
+    ALERT_EVAL_CRON: z.string().default('* * * * *'),
+    // Hysteresis: open after N consecutive bad evaluations, resolve after M good.
+    ALERT_OPEN_AFTER: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(100)),
+    ALERT_RESOLVE_AFTER: z.string().default('3').transform(Number).pipe(z.number().int().min(1).max(100)),
+    // Unacknowledged CRITICAL incidents re-notify this often.
+    ALERT_ESCALATE_EVERY_MS: z.string().default(String(30 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // At most one open notification per subject per this period.
+    ALERT_MIN_REOPEN_MS: z.string().default(String(10 * 60_000)).transform(Number).pipe(z.number().int().min(0)),
+    // Outbox rows in SUBMITTED/PENDING older than this are WARN (past maxTime is CRITICAL).
+    ALERT_OUTBOX_STUCK_MS: z.string().default(String(15 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // Terminal outbox rows whose completion handler has not run after this long.
+    ALERT_UNHANDLED_MS: z.string().default(String(10 * 60_000)).transform(Number).pipe(z.number().int().min(60_000)),
+    // Consecutive failed runs of one cron job before it alerts.
+    ALERT_CRON_FAILURE_STREAK: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
+    // Operator pauses are INFO and not alerted unless enabled.
+    ALERT_OPERATOR_PAUSES: boolDefault('false'),
+    // Severity → sink names, e.g. {"CRITICAL":["webhook:0","slack"],"WARN":["slack"]}.
+    // Empty = every sink for WARN and CRITICAL, none for INFO.
+    ALERT_ROUTES_JSON: optionalString.refine((v) => {
+      if (v === '') return true;
+      try {
+        const parsed = JSON.parse(v);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          Object.entries(parsed).every(([k, list]) => ['INFO', 'WARN', 'CRITICAL'].includes(k) &&
+            Array.isArray(list) && list.every((n) => typeof n === 'string'));
+      } catch {
+        return false;
+      }
+    }, 'must be a JSON object of INFO|WARN|CRITICAL → sink-name arrays'),
+
     // ── Transaction outbox (#35) ──────────────────────────────────────────
     // Recovery worker interval; it resolves non-terminal chain_transactions.
     OUTBOX_POLL_MS: z.string().default('5000').transform(Number)
@@ -572,6 +608,8 @@ export const envObjectSchema = z
     // largest log-odds intercept a fitted map may apply.
     RECALIBRATION_PRIOR_STRENGTH: z.string().default('20').transform(Number).pipe(z.number().positive()),
     RECALIBRATION_MAX_INTERCEPT: z.string().default('0.5').transform(Number).pipe(z.number().min(0).max(2)),
+    // #223 learned source weights: a key fitted on fewer effective samples keeps its parent weight.
+    WEIGHTS_MIN_NEFF: z.string().default('30').transform(Number).pipe(z.number().positive()),
 
     // Build commit, recorded in trace provenance (#66). Set by CI/deploy.
     GIT_SHA: optionalString,
@@ -650,6 +688,8 @@ export const envObjectSchema = z
     TRADER_MAX_PRICE_DRIFT_BPS: z.string().default('150').transform(Number).pipe(z.number().int().min(0)),
     /** Consecutive stale-price markets that abort the scan cycle with PRICE_SOURCE_DOWN. */
     TRADER_STALE_ABORT_COUNT: z.string().default('3').transform(Number).pipe(z.number().int().min(1)),
+    /** #225 — max ledgers the reserves the trader sizes against may lag the RPC (valuation DEFAULT_MAX_AGE_LEDGERS). */
+    TRADER_POOL_MAX_AGE_LEDGERS: z.string().default('120').transform(Number).pipe(z.number().int().min(1)),
     // #147 — development-only local IPFS stub selected explicitly.
     IPFS_TRANSPORT: z.enum(['pinata', 'local']).default('pinata'),
     IPFS_LOCAL_DIR: z.string().default('.ipfs-local'),
@@ -678,6 +718,21 @@ export const envObjectSchema = z
     // Raw provider payloads are deleted after this many days.
     SIGNAL_RAW_RETENTION_DAYS: z.string().default('7').transform(Number)
       .pipe(z.number().int().min(1).max(365)),
+
+    // ── Cross-source corroboration (#228) ─────────────────────────────────
+    // off: no check. observe: log the verdict and continue. enforce: an
+    // uncorroborated proposal creates nothing (no row, pin, seed or trace).
+    CORROBORATION_MODE: z.enum(['off', 'observe', 'enforce']).default('observe'),
+    // Independent units (clusters merged by domain and rewrite distance) needed.
+    CORROBORATION_MIN_PUBLISHERS: z.string().default('2').transform(Number).pipe(z.number().int().min(1).max(20)),
+    // Coverage must be published within this many hours before the cycle.
+    CORROBORATION_WINDOW_HOURS: z.string().default('72').transform(Number).pipe(z.number().int().min(1).max(24 * 30)),
+    // SimHash distance under which two clusters are one rewritten story.
+    CORROBORATION_SIMHASH_REWRITE: z.string().default('10').transform(Number).pipe(z.number().int().min(0).max(64)),
+    // Store rows considered per check, newest first.
+    CORROBORATION_MAX_CANDIDATES: z.string().default('500').transform(Number).pipe(z.number().int().min(1).max(10_000)),
+    // Live mode requires enforce unless this is set.
+    CORROBORATION_ALLOW_OBSERVE_LIVE: boolDefault('false'),
 
     // ── Resilience & Timeouts ─────────────────────────────────────────────
     TIMEOUT_RPC_READ_MS: z.string().default('8000').transform(Number),
@@ -749,6 +804,23 @@ export const envObjectSchema = z
     CORRELATION_PRIOR_KAPPA: z.string().default('20').transform(Number)
       .pipe(z.number().positive()),
 
+    // ── Portfolio risk (Issue #280) ───────────────────────────────────────
+    // Monte Carlo paths per run, the largest positions kept, the shrinkage
+    // applied to snapshot correlations, and a soft wall-clock budget.
+    RISK_MC_PATHS: z.string().default('20000').transform(Number)
+      .pipe(z.number().int().min(100)),
+    RISK_MAX_MARKETS: z.string().default('150').transform(Number)
+      .pipe(z.number().int().min(1)),
+    RISK_RHO_SHRINK: z.string().default('0.8').transform(Number)
+      .pipe(z.number().min(0).max(1)),
+    RISK_MAX_DURATION_MS: z.string().default('10000').transform(Number)
+      .pipe(z.number().int().positive()),
+    // Expected-shortfall gate (bps of bankroll); off by default. Exported by the
+    // service, not yet enforced by any caller.
+    RISK_GATE_ENABLED: boolDefault('false'),
+    RISK_MAX_ES_BPS: z.string().default('500').transform(Number)
+      .pipe(z.number().int().min(0).max(10_000)),
+
     // ── Market lifecycle reconciler (Issue #83) ───────────────────────────
     RECONCILE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
     RECONCILE_MAX_MARKETS: z.string().default('200').transform(Number)
@@ -760,6 +832,19 @@ export const envObjectSchema = z
     // How far (in ledgers) the indexer may trail an observation before
     // resolution findings are deferred to it.
     RECONCILE_INDEXER_LAG_LEDGERS: z.string().default('20').transform(Number)
+      .pipe(z.number().int().min(0)),
+
+    // ── Money audit (Issue #222) ──────────────────────────────────────────
+    MONEY_AUDIT_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+    // Guarded repairs (re-running idempotent handlers); off by default.
+    MONEY_AUDIT_AUTO_REPAIR: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    // A subject updated this recently is in flight, not drift.
+    MONEY_AUDIT_GRACE_MS: z.string().default('120000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    // A PENDING trade with no in-flight outbox row older than this is stuck.
+    MONEY_AUDIT_PENDING_GRACE_MS: z.string().default('3600000').transform(Number)
+      .pipe(z.number().int().min(0)),
+    MONEY_AUDIT_MAX_RPC_CALLS: z.string().default('200').transform(Number)
       .pipe(z.number().int().min(0)),
 
     // ── Copy Trading (Issue #151) ─────────────────────────────────────────
@@ -890,6 +975,13 @@ export const envSchema = envObjectSchema
       }
     }
     if (env.CHAIN_EXECUTION_MODE === 'live') {
+      if (env.CORROBORATION_MODE !== 'enforce' && !env.CORROBORATION_ALLOW_OBSERVE_LIVE) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['CORROBORATION_MODE'],
+          message: 'must be enforce when CHAIN_EXECUTION_MODE=live (or set CORROBORATION_ALLOW_OBSERVE_LIVE=true)',
+        });
+      }
       if (!env.AGENT_SECRET_KEY) {
         ctx.addIssue({ code: 'custom', path: ['AGENT_SECRET_KEY'], message: 'is required when CHAIN_EXECUTION_MODE=live' });
       }

@@ -20,9 +20,12 @@ export async function authClass(req: Request): Promise<string> {
     return 'anon';
   }
 
-  const traceId = req.params.id;
+  const traceId = req.params.id === undefined ? undefined : String(req.params.id);
   if (traceId) {
     try {
+      // Loaded lazily: response.util imports this module, and a static import of
+      // subscription.service closes a cycle back through error.middleware.
+      const { checkAccess } = await import('../services/subscription.service');
       const access = await checkAccess(user.userId, traceId);
       if (access.hasAccess) return 'pass';
     } catch {}

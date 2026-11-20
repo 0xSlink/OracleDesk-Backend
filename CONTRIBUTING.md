@@ -167,6 +167,36 @@ Writing an integration test:
 - Use `withRedisPrefix()` from `tests/helpers/redis.ts` so parallel files don't
   share Redis keys.
 
+### Outbox crash matrix
+
+`tests/integration/outbox-recovery.int.test.ts` (#229) kills a live chain write
+at each point of the outbox state machine and checks that recovery applies
+exactly one domain effect for `market.create`, `trade.buy`, `trade.sell` and
+`trace.publish`. The crash points are named in `chain.service.ts`
+(`setCrashHookForTest`, inert unless `NODE_ENV=test`):
+
+| Crash point | Row left behind |
+|---|---|
+| `after-built` | `BUILT`, nothing signed |
+| `after-signed` | `SIGNED`, envelope and hash stored, never sent |
+| `after-send-accepted` | `SUBMITTED`, sequence not yet advanced |
+| `after-send-timeout` | `SIGNED`, the send timed out (it may have reached the network) |
+| `after-advance` | `SUBMITTED`, sequence advanced, no confirmation |
+
+The suite also crashes after a completion handler ran but before `markHandled`,
+and runs two recoverers with separate Prisma clients at once. The pieces live
+in `tests/helpers/outbox-harness.ts`: `freshModules()` (a process restart: new
+module copies, new Prisma client), `fakeChain()` (a scriptable RPC wired into
+`setTransactionSender`/`setTransactionReader`/`RecoverDeps.server`) and
+`installBindings()`. Run it with Docker running, or with `TEST_DATABASE_URL` and
+`TEST_REDIS_URL` set:
+
+```
+npm run build:test
+node --test --test-global-setup=dist-tests/tests/integration/global-setup.js \
+  dist-tests/tests/integration/outbox-recovery.int.test.js
+```
+
 ## Recording cassettes
 
 The agent-cycle tests (`tests/agents-cycle.test.ts`) run `runMarketMakerCycle()`
