@@ -43,8 +43,6 @@
 import type Redis from 'ioredis';
 
 export type Provider = 'anthropic' | 'gemini' | 'openai';
-export const PROVIDERS: readonly Provider[] = ['anthropic', 'gemini', 'openai'];
-
 export type Priority = 'cron' | 'admin';
 export type PurposeClass = 'dispute' | 'admin' | 'generation' | 'forecast' | 'hedge' | 'other';
 export const PURPOSE_CLASSES: readonly PurposeClass[] = [
@@ -149,6 +147,7 @@ export interface LlmGuardStore {
 }
 
 const DAY_MS = 86_400_000;
+const providers: Provider[] = ['anthropic', 'gemini', 'openai'];
 
 export function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
@@ -887,7 +886,6 @@ export class MemoryGuardStore implements LlmGuardStore {
       tokens: b.tokens,
       costMicros: b.costMicros,
       reserved: b.reserved,
-      byClass,
       breakers: {
         anthropic: this.effective('anthropic', now),
         gemini: this.effective('gemini', now),

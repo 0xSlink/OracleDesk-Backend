@@ -1,32 +1,5 @@
-/**
- * Central cron scheduler and persisted run history (#336).
- *
- * Every scheduled job goes through `scheduleJob()`:
- *   - Upserts `cron_registrations` on boot and heartbeats every 5 minutes.
- *   - Records `SKIPPED_DISABLED` once at boot when gated off by config.
- *   - Runs every tick inside `runWithContext({ kind: 'cron', job, cycleId })`.
- *   - Applies a per-job overlap guard (`SKIPPED_OVERLAP`).
- *   - Inserts a `RUNNING` row at tick start and updates it on finish with
- *     outcome, durationMs, errorClass, scrubbed errorMessage, and counters.
- *   - Persistence is strictly best-effort (1 s write timeout): DB outages never
- *     fail jobs. Finished rows fall back to a bounded in-memory buffer (500)
- *     flushed on the next successful write, plus the in-memory `lastRuns` map.
- */
-import crypto from 'crypto';
-import cron, { type ScheduledTask } from 'node-cron';
-import { config } from '../config';
-import { newId, runWithContext } from '../lib/context';
-import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
-import { TimeoutError, deadline } from '../lib/resilience';
-import { shutdownController } from '../lib/shutdown';
-import { AppError } from '../middlewares/error.middleware';
-import {
-  CRON_JOBS_BY_NAME,
-  resolveJobEnabled,
-  resolveJobExpression,
-  type JobName,
-} from './jobs';
+import { logger } from '../lib/logger';
 
 export type CronOutcome = 'success' | 'failure';
 
@@ -286,48 +259,11 @@ async function persistStart(row: CronRunRecord): Promise<boolean> {
   }
 }
 
-async function persistFinish(row: CronRunRecord, inserted: boolean): Promise<void> {
-  try {
-    await withWriteTimeout(() => activeStore().finishRun(row, inserted));
-    if (pendingBuffer.length > 0) {
-      await flushBuffered();
-    }
-  } catch (err) {
-    logger.debug({ job: row.job, err: err instanceof Error ? err.message : err }, 'cron: failed to persist finished row; buffering');
-    enqueueBuffered(row);
-  }
-}
-
-async function persistRegistration(job: JobName, expression: string, timezone: string, enabled: boolean): Promise<void> {
-  try {
-    await withWriteTimeout(() =>
-      activeStore().upsertRegistration({
-        instanceId: config.INSTANCE_ID,
-        job,
-        expression,
-        timezone,
-        enabled,
-        heartbeatAt: new Date(),
-      }),
-    );
-  } catch (err) {
-    logger.debug({ job, err: err instanceof Error ? err.message : err }, 'cron: failed to upsert registration');
-  }
-}
-
-function ensureHeartbeatLoop(): void {
-  if (heartbeatTimer) return;
-  heartbeatTimer = setInterval(() => {
-    for (const [job, meta] of registeredJobs) {
-      void persistRegistration(job, meta.expression, meta.timezone, meta.enabled);
-    }
-  }, HEARTBEAT_INTERVAL_MS);
-  heartbeatTimer.unref();
-}
-
-// ─── Legacy In-Memory Fallback ──────────────────────────────────────────────
-
-/** In-memory last success/failure per cron job (#111); fallback when Postgres is down. */
+/**
+ * Records a cron run: in memory per instance (#111), and in cron_runs so the
+ * failure streak is cluster-wide (#226). The database write is fire-and-forget:
+ * a cron job never fails or waits because its bookkeeping could not be saved.
+ */
 export function recordCronRun(job: string, outcome: CronOutcome, startedAt: Date, finishedAt: Date, error?: unknown): void {
   const entry = lastRuns.get(job) ?? {};
   const run: LegacyCronRun = { startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString() };
@@ -338,6 +274,28 @@ export function recordCronRun(job: string, outcome: CronOutcome, startedAt: Date
     entry.lastFailure = run;
   }
   lastRuns.set(job, entry);
+  void persistCronRun(job, outcome, finishedAt, run.error).catch((err) =>
+    logger.warn({ err, job }, 'cron_runs write failed'));
+}
+
+const MAX_ERROR_CHARS = 500;
+
+/** Upsert into cron_runs; the streak increments atomically across instances. */
+export async function persistCronRun(job: string, outcome: CronOutcome, at: Date, error?: string): Promise<void> {
+  if (outcome === 'success') {
+    await prisma.cronRunStatus.upsert({
+      where: { job },
+      create: { job, lastSuccessAt: at, failureStreak: 0 },
+      update: { lastSuccessAt: at, failureStreak: 0 },
+    });
+    return;
+  }
+  const lastError = (error ?? 'error').slice(0, MAX_ERROR_CHARS);
+  await prisma.cronRunStatus.upsert({
+    where: { job },
+    create: { job, lastFailureAt: at, failureStreak: 1, lastError },
+    update: { lastFailureAt: at, failureStreak: { increment: 1 }, lastError },
+  });
 }
 
 export function getCronStatus(): Record<string, { lastSuccess?: LegacyCronRun; lastFailure?: LegacyCronRun }> {
